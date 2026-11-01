@@ -116,19 +116,23 @@ def encode_targets(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def make_balanced_cohort(df: pd.DataFrame, extra_grade4: int = 20, seed: int = 42) -> list[str]:
-    """Reproduce the thesis cohort: all grade 2/3 plus (n_grade3 + extra_grade4) random grade-4 patients.
+def make_balanced_cohort(metadata_csv: str | Path, extra_grade4: int = 20, seed: int = 42) -> list[str]:
+    """Rebuild the thesis cohort: all grade 2/3 plus (n_grade3 + extra_grade4) random grade-4 patients.
 
-    Same selection rule and random_state as ``analysis.ipynb`` (sklearn ``resample`` on the grade-4 rows
-    in file order). Prefer passing the saved cohort CSV so the exact IDs are reused.
+    Matches ``analysis.ipynb`` exactly, which drew with sklearn ``resample`` from the grade-4 rows of the
+    *raw* file in file order, i.e. a pool of 402 that includes the 6 follow-up scans. Dropping the
+    follow-ups first changes the draw (only 124/162 patients would match). Verified on the v5
+    metadata: this reproduces all 162 IDs of ``balanced_metadata_gradeaware.csv``. Follow-up rows
+    (none at seed 42) are skipped. Prefer the saved cohort CSV when you have it.
     """
     from sklearn.utils import resample
 
-    g4 = df[df["Grade"] == 4]
-    n_g3 = int((df["Grade"] == 3).sum())
+    raw = pd.read_csv(metadata_csv).rename(columns=RENAME_MAP)
+    g4 = raw[raw["Grade"] == 4]
+    n_g3 = int((raw["Grade"] == 3).sum())
     g4_kept = resample(g4, replace=False, n_samples=n_g3 + extra_grade4, random_state=seed)
-    keep = df[df["Grade"].isin([2, 3])].index.tolist() + g4_kept.index.tolist()
-    return sorted(keep)
+    ids = raw.loc[raw["Grade"].isin([2, 3]), "ID"].tolist() + g4_kept["ID"].tolist()
+    return sorted(normalize_patient_id(i) for i in ids if not FOLLOWUP.search(str(i)))
 
 
 def check_leakage(tasks: Iterable[str], groups: Iterable[str], allow_leakage: bool = False) -> None:

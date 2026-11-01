@@ -36,7 +36,7 @@ def main() -> None:
         cohort = sorted(pd.read_csv(cohort_csv)["ID"].map(normalize_patient_id))
         print(f"Cohort: {len(cohort)} patients from {cohort_csv}")
     else:
-        cohort = make_balanced_cohort(meta, seed=cfg.get("seed", 42))
+        cohort = make_balanced_cohort(d["metadata_csv"], seed=cfg.get("seed", 42))
         print(f"Cohort: {len(cohort)} patients rebuilt with the thesis balancing rule")
 
     if args.from_metadata:
