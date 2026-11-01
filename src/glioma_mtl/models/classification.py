@@ -150,9 +150,18 @@ class MultiTaskGliomaNet(nn.Module):
             tokens.append(tok)
         return tokens
 
+    @property
+    def token_names(self) -> list[str]:
+        """Names of the context tokens, in order (image stages, decoder, tabular inputs)."""
+        names = [f"image_stage{s}" for s in self.encoder_stages]
+        if self.use_decoder_token:
+            names.append("image_decoder")
+        return names + list(self.tab_proj)
+
     # ------------------------------------------------------------------------------------ forward
-    def forward(self, image: torch.Tensor, tabular: Mapping[str, torch.Tensor] | None = None,
-                mask: torch.Tensor | None = None) -> dict:
+    def encode(self, image: torch.Tensor, tabular: Mapping[str, torch.Tensor] | None = None,
+               mask: torch.Tensor | None = None) -> dict:
+        """Backbone + tokenisation: ``feats`` (SwinOutputs), ``image_tokens`` and ``tab_tokens`` ([B, d] each)."""
         with torch.set_grad_enabled(torch.is_grad_enabled() and not self.freeze_backbone):
             feats = swin_unetr_forward(self.backbone, image)
         attn_mask = self._mask(feats.logits, mask)
@@ -166,23 +175,29 @@ class MultiTaskGliomaNet(nn.Module):
             if fmap.shape[1] != expected:  # fail loudly, never substitute zeros
                 raise RuntimeError(f"feature map has {fmap.shape[1]} channels, projection expects {expected}")
             image_tokens.append(proj(masked_mean(fmap, attn_mask)))
+        return {"feats": feats, "image_tokens": image_tokens, "tab_tokens": self._tabular_tokens(tabular)}
 
-        context = torch.stack(image_tokens + self._tabular_tokens(tabular), dim=1) + self.type_embed
-        B = image.shape[0]
-        queries = self.task_tokens.expand(B, -1, -1)
+    def context(self, image_tokens: list, tab_tokens: list, drop: Sequence[int] = ()) -> torch.Tensor:
+        """[B, n_ctx, d] context; tokens listed in ``drop`` are zeroed (as modality dropout does in training)."""
+        tokens = [torch.zeros_like(t) if i in drop else t for i, t in enumerate(image_tokens + tab_tokens)]
+        return torch.stack(tokens, dim=1) + self.type_embed
 
+    def fuse(self, context: torch.Tensor) -> tuple[dict, torch.Tensor]:
+        """Context tokens -> per-task logits and the fused task representations [B, n_tasks, d]."""
+        queries = self.task_tokens.expand(context.shape[0], -1, -1)
         if self.fusion == "transformer":
             fused = self.fuser(torch.cat([queries, context], dim=1))[:, : len(self.tasks)]
         elif self.fusion == "cross_attention":
             fused = self.fuser(tgt=queries, memory=context)
         else:
             fused = self.fuser(context.flatten(1)).unsqueeze(1).expand(-1, len(self.tasks), -1)
+        return {t: self.heads[t](fused[:, i]) for i, t in enumerate(self.tasks)}, fused
 
-        out = {
-            "seg_logits": feats.logits,
-            "logits": {t: self.heads[t](fused[:, i]) for i, t in enumerate(self.tasks)},
-            "embedding": fused.mean(1),
-        }
+    def forward(self, image: torch.Tensor, tabular: Mapping[str, torch.Tensor] | None = None,
+                mask: torch.Tensor | None = None, drop_tokens: Sequence[int] = ()) -> dict:
+        enc = self.encode(image, tabular, mask)
+        logits, fused = self.fuse(self.context(enc["image_tokens"], enc["tab_tokens"], drop_tokens))
+        out = {"seg_logits": enc["feats"].logits, "logits": logits, "embedding": fused.mean(1)}
         if self.aux is not None:
-            out["aux"] = {t: [head(tok) for head, tok in zip(self.aux[t], image_tokens)] for t in self.tasks}
+            out["aux"] = {t: [head(tok) for head, tok in zip(self.aux[t], enc["image_tokens"])] for t in self.tasks}
         return out

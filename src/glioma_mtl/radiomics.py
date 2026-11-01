@@ -41,6 +41,11 @@ class TopK(BaseEstimator, TransformerMixin):
     def transform(self, X):
         return np.asarray(X)[:, self.support_]
 
+    def get_feature_names_out(self, input_features=None):
+        names = np.asarray(input_features if input_features is not None
+                           else [f"x{i}" for i in range(int(self.support_.max()) + 1)], dtype=object)
+        return names[self.support_]
+
 # Settings used in the thesis (T2, intensity-normalised, 1 mm, bin width 5).
 DEFAULT_SETTINGS = {
     "normalize": True,

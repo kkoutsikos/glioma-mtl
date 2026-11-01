@@ -82,7 +82,9 @@ python scripts/run_paper.py --plan configs/paper.yaml --dry-run
 python scripts/run_paper.py --plan configs/paper.yaml
 ```
 
-Tables are written to `runs/paper/paper_tables/` (CSV, Markdown, LaTeX).
+Tables are written to `runs/paper/paper_tables/` (CSV, Markdown, LaTeX) and figures to
+`runs/paper/paper_figures/`. Explanations (fusion attention, token occlusion, 3D Grad-CAM) are in each
+classifier's `explain/` folder, and XGBoost TreeSHAP is in `kfold_cv/holdout_shap.csv`.
 
 ## Usage
 

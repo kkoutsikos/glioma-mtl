@@ -45,8 +45,23 @@ These further changes are improvements rather than error fixes. State them in th
 | `predict` | backbone on classification train/val/test | predicted masks for crop localisation, deep features, radiomics | – |
 | `features` | 1 + 1 | label-free deep features, radiomics from predicted masks | – |
 | `cls` | 3 experiments × 3 seeds | what imaging adds for grade / diagnosis; what molecular data explain (reference) | `classification` |
-| `kfold` | repeated 5-fold × 10 + hold-out | XGBoost / logistic regression / RF late fusion of demographics, radiomics and deep features; tabular baselines | `kfold_cv`, `kfold_holdout` |
+| `explain` | first seed of each classifier | which modality / image scale drives each prediction: fusion attention, token occlusion, 3D Grad-CAM per test patient | figures |
+| `kfold` | repeated 5-fold × 10 + hold-out | XGBoost / logistic regression / RF late fusion of demographics, radiomics and deep features; tabular baselines; XGBoost TreeSHAP per modality | `kfold_cv`, `kfold_holdout` |
 | `aggregate` | – | writes all tables (CSV, Markdown, LaTeX) | – |
+| `figures` | – | training curves, segmentation boxplots + qualitative overlays, confusion matrices, ROC curves, k-fold bars, SHAP | figures |
+
+### What is saved (all under `output_root`, i.e. on Drive)
+
+| Where | What |
+|---|---|
+| `<run>/best.pt`, `config.yaml`, `history.csv`, `log.txt` | weights, the exact config, per-epoch metrics and log of every SSL, segmentation and classifier run (`last.pt` is removed once a run finishes) |
+| `<seg run>/per_case_segmentation_test.csv`, `summary_*.csv` | per-patient Dice / IoU / HD95 / NSD / sensitivity / precision; bootstrap summary |
+| `predictions/<backbone>/` | predicted tumour masks (NIfTI, original grid) of the classification cohort |
+| `<cls run>/predictions_test.csv`, `metrics_test.csv`, `val_predictions_best.csv`, `featurizers.pkl` | test probabilities and metrics with CIs; fitted clinical / radiomics preprocessing |
+| `<cls run, first seed>/explain/` | `attention.csv`, `occlusion.csv` (+ summaries and plots), `gradcam/<patient>_<task>_<map>.png` |
+| `deep_features/`, `radiomics/` | label-free deep features and radiomics of the cohort |
+| `kfold_cv/` | `cv_results.csv`, `holdout_results.csv`, `holdout_predictions.csv`, `holdout_shap.csv` |
+| `paper_tables/`, `paper_figures/` | all tables (CSV / Markdown / LaTeX) and figures |
 
 ### About the k-fold late fusion
 

@@ -24,7 +24,7 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-STAGES = ["splits", "ssl", "seg", "predict", "features", "cls", "kfold", "aggregate"]
+STAGES = ["splits", "ssl", "seg", "predict", "features", "cls", "explain", "kfold", "aggregate", "figures"]
 
 
 @dataclass
@@ -124,6 +124,13 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                                                              *sets([], ["data.crop_mask_key=pred_mask",
                                                                         f"data.pred_mask_dir={pred_dir}"])],
                                   optional=spec.get("optional", False), needs=[f"cls_train:{name}", "predict:test"]))
+            first = f"{exp}_s{cls.get('seeds', [42])[0]}"
+            run = (root / first).as_posix()
+            steps.append(Step(f"explain:{first}", "explain", [
+                _script("explain_classifier.py"), "--config", f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",
+                "--split", "test", "--out-dir", f"{run}/explain",
+                *sets([], ["data.crop_mask_key=pred_mask", f"data.pred_mask_dir={pred_dir}"])],
+                optional=True, needs=[f"cls_train:{first}", "predict:test"]))
 
     if kfold:
         extra = []
@@ -141,6 +148,8 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
 
     steps.append(Step("aggregate", "aggregate", [_script("aggregate_results.py"), "--plan", "PLAN",
                                                  "--root", root.as_posix(), "--out", (root / "paper_tables").as_posix()]))
+    steps.append(Step("figures", "figures", [_script("make_figures.py"), "--plan", "PLAN", "--root", root.as_posix(),
+                                             "--out", (root / "paper_figures").as_posix(), "--qualitative"]))
     return steps, root
 
 

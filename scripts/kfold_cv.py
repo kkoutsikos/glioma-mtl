@@ -86,6 +86,22 @@ def build_pipeline(groups, rad_cols, deep_cols, k_rad, k_deep, model) -> Pipelin
     return Pipeline([("features", ColumnTransformer(parts)), ("clf", model)])
 
 
+GROUPS = {"num": "clinical", "cat": "clinical", "rad": "radiomics", "deep": "deep"}
+
+
+def tree_shap(pipe: Pipeline, X_test: pd.DataFrame, task: str, features: str) -> list[dict]:
+    """Mean |SHAP| per selected feature on the hold-out test set, via XGBoost's exact TreeSHAP (pred_contribs)."""
+    import xgboost
+
+    Xt = pipe[:-1].transform(X_test)
+    names = pipe[:-1].get_feature_names_out()
+    contribs = pipe[-1].get_booster().predict(xgboost.DMatrix(Xt), pred_contribs=True)
+    contribs = np.abs(contribs[..., :-1])            # drop the bias column; [n, (k,) f]
+    mean_abs = contribs.mean(axis=tuple(range(contribs.ndim - 1)))
+    return [{"task": task, "features": features, "feature": n, "group": GROUPS.get(n.split("__")[0], "other"),
+             "mean_abs_shap": float(v)} for n, v in zip(names, mean_abs)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True)
@@ -125,7 +141,7 @@ def main() -> None:
     out_dir = Path(args.out_dir or Path(cfg.get("output_root", "runs")) / "kfold_cv")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cv_rows, holdout_rows = [], []
+    cv_rows, holdout_rows, pred_rows, shap_rows = [], [], [], []
     for task in cfg["tasks"]:
         label_col, classes = TASKS[task]
         sub = df[df[label_col] >= 0]
@@ -163,8 +179,13 @@ def main() -> None:
                     pipe.fit(X.loc[train_ids], y_tr, **kw)
                     proba = np.zeros((len(test_ids), len(classes)))
                     proba[:, pipe.classes_] = pipe.predict_proba(X.loc[test_ids])
-                    table, _ = classification_metrics(sub.loc[test_ids, label_col].to_numpy(), proba,
-                                                      [str(c) for c in classes], seed=cfg.get("seed", 42))
+                    y_te = sub.loc[test_ids, label_col].to_numpy()
+                    pred_rows += [{"task": task, "features": label, "model": model_name, "patient_id": pid, "y": int(yv),
+                                   **{f"p_{k}": float(p) for k, p in enumerate(pr)}}
+                                  for pid, yv, pr in zip(test_ids, y_te, proba)]
+                    if model_name == "xgboost":
+                        shap_rows += tree_shap(pipe, X.loc[test_ids], task, label)
+                    table, _ = classification_metrics(y_te, proba, [str(c) for c in classes], seed=cfg.get("seed", 42))
                     for _, r in table[~table["metric"].str.startswith("recall")].iterrows():
                         holdout_rows.append({"task": task, "features": label, "model": model_name, "metric": r["metric"],
                                              "value": r["value"], "ci_low": r["ci_low"], "ci_high": r["ci_high"],
@@ -177,7 +198,10 @@ def main() -> None:
     print(f"\n{wide.to_string()}\n\nSaved {out_dir / 'cv_results.csv'}")
     if holdout_rows:
         pd.DataFrame(holdout_rows).to_csv(out_dir / "holdout_results.csv", index=False)
-        print(f"Saved {out_dir / 'holdout_results.csv'}")
+        pd.DataFrame(pred_rows).to_csv(out_dir / "holdout_predictions.csv", index=False)
+        if shap_rows:
+            pd.DataFrame(shap_rows).to_csv(out_dir / "holdout_shap.csv", index=False)
+        print(f"Saved {out_dir / 'holdout_results.csv'}, holdout_predictions.csv, holdout_shap.csv")
     elif args.holdout:
         print("--holdout needs data.splits_file; skipped")
 
