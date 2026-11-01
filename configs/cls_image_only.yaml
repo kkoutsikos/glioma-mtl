@@ -1,0 +1,6 @@
+inherit: cls_mask_guided.yaml
+name: cls_image_only
+
+# Pure imaging model: answers "what does the MRI contribute?"
+clinical:
+  groups: []

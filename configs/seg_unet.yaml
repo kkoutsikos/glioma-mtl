@@ -1,0 +1,12 @@
+inherit: seg_swin_unetr.yaml
+name: seg_unet
+
+# The thesis UNet used channels (16, 32, 64, 128, 256), dropout 0.1 and reached only 0.64 Dice.
+# A residual 3D U-Net normally lands near the other models; these widths are a stronger baseline.
+model:
+  name: unet
+  channels: [32, 64, 128, 256, 320]
+  strides: [2, 2, 2, 2]
+  num_res_units: 2
+  norm: instance
+  dropout: 0.0

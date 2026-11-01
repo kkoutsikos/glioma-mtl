@@ -1,0 +1,30 @@
+# Shared settings. Experiment configs start with `inherit: base.yaml` and override what they need.
+# Any value can be overridden on the command line:  --set data.image_dir=/path train.epochs=5
+
+seed: 42
+device: auto            # auto | cuda | cpu
+output_root: runs
+
+data:
+  # UCSF-PDGM layout: either the official nested release or flat folders, see data/README.md
+  image_dir: data/raw/UCSF-PDGM
+  label_dir: null       # null = same as image_dir
+  metadata_csv: data/metadata/UCSF-PDGM-metadata_v5.csv
+  cohort_csv: data/metadata/balanced_metadata_gradeaware.csv   # classification cohort (thesis: 162 patients)
+  splits_file: data/splits/splits_seed42.json
+  modalities: [T2]      # e.g. [T2, FLAIR, T1c] for multi-channel input (set model.in_channels to match)
+  spacing: [1.0, 1.0, 1.0]
+  roi_size: [96, 96, 96]
+  intensity:
+    kind: zscore        # zscore | range | percentile ; the thesis used `range` with a_min=0, a_max=3000
+    a_min: 0
+    a_max: 3000
+  cache: disk           # none | memory | disk
+  cache_dir: data/cache
+  num_workers: 4
+  batch_size: 2
+  num_samples: 2        # random crops per volume per iteration
+
+splits:
+  val_frac: 0.15
+  test_frac: 0.15

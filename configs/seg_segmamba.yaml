@@ -1,0 +1,9 @@
+inherit: seg_swin_unetr.yaml
+name: seg_segmamba
+
+# Needs a CUDA build of https://github.com/ge-xing/SegMamba (see models/segmentation.py).
+model:
+  name: segmamba
+  segmamba_repo: third_party/SegMamba
+  depths: [2, 2, 2, 2]
+  feat_size: [48, 96, 192, 384]

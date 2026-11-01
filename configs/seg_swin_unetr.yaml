@@ -1,0 +1,20 @@
+inherit: base.yaml
+name: seg_swin_unetr
+
+model:
+  name: swin_unetr
+  feature_size: 48
+  use_checkpoint: true
+  init:
+    encoder: null       # path to runs/ssl_swin_unetr/best.pt (or the thesis' pretrained_swinViT_encoder_weights_BEST.pt)
+    checkpoint: null
+
+# Use the *same* budget for every architecture you compare.
+train:
+  epochs: 100
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_epochs: 3
+  val_every: 2
+  amp: true
+  patience: null

@@ -1,0 +1,7 @@
+inherit: seg_swin_unetr.yaml
+name: seg_segresnet
+
+model:
+  name: segresnet
+  init_filters: 16
+  dropout: 0.2

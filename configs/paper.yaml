@@ -1,0 +1,49 @@
+# Experiment plan for the paper, executed by scripts/run_paper.py (resumable, skips finished steps).
+# Every step is a normal script call; the runner only adds names, seeds and paths between stages.
+# All checkpoints from the thesis are invalid here: they were trained on splits that contained the
+# classification test patients. Everything below is retrained on data/splits/splits_seed42.json.
+
+# Applied to every step. Put your data paths here (or pass them with --set on the command line).
+overrides:
+  - data.image_dir=data/raw/UCSF-PDGM
+  - data.label_dir=null
+  - data.metadata_csv=data/metadata/UCSF-PDGM-metadata_v5.csv
+  - data.cohort_csv=data/metadata/balanced_metadata_gradeaware.csv
+  - output_root=runs/paper
+
+# Delete each run's last.pt (weights + optimizer state) once the run has finished; only best.pt is
+# used afterwards. Keeps total Drive usage at roughly 3-4 GB instead of ~12 GB.
+keep_last_checkpoints: false
+
+splits:
+  config: configs/base.yaml
+
+ssl:
+  config: configs/ssl.yaml
+  overrides: [train.epochs=50]          # ~13 min/epoch on a T4 at batch 2 (thesis log)
+
+segmentation:
+  seeds: [42]                           # add 43, 44 if compute allows (report mean ± SD over seeds)
+  overrides: [train.epochs=100, train.val_every=5]   # identical budget for every model
+  models:
+    seg_swin_unetr: {config: configs/seg_swin_unetr.yaml}
+    seg_swin_unetr_ssl: {config: configs/seg_swin_unetr_ssl.yaml, needs_ssl: true}
+    seg_segresnet: {config: configs/seg_segresnet.yaml}
+    seg_unet: {config: configs/seg_unet.yaml}
+    seg_segmamba: {config: configs/seg_segmamba.yaml, optional: true}   # needs the CUDA SegMamba build
+
+classification:
+  backbone: seg_swin_unetr_ssl          # segmentation run (first seed) used as backbone + mask predictor
+  feature_config: configs/cls_mask_guided.yaml   # data/model settings for deep-feature + radiomics extraction
+  seeds: [42, 43, 44]
+  overrides: [train.epochs=100]
+  experiments:
+    cls_image_only: {config: configs/cls_image_only.yaml}
+    cls_mask_guided: {config: configs/cls_mask_guided.yaml}              # imaging + age/sex
+    cls_leaky_reference: {config: configs/cls_leaky_reference.yaml, reference: true}
+
+kfold:                                  # XGBoost / logistic regression / RF late fusion, repeated k-fold
+  config: configs/kfold_cv.yaml
+  use_deep_features: true
+  use_radiomics: true
+  holdout: true

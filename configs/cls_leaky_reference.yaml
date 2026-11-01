@@ -1,0 +1,9 @@
+inherit: cls_mask_guided.yaml
+name: cls_leaky_reference
+
+# Reference only: the thesis clinical vector (incl. IDH, 1p/19q, MGMT, EOR) with the *corrected* pipeline.
+# Shows how much of a result the molecular / surgical variables explain. Never report it as an imaging
+# model; label it "uses post-operative molecular data" in any table.
+clinical:
+  groups: [demographics, history, molecular, surgical]
+  allow_leakage: true

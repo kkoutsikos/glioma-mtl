@@ -1,0 +1,63 @@
+inherit: base.yaml
+name: cls_mask_guided
+
+tasks: [grade, diagnosis]          # any of: grade, diagnosis, idh
+
+# Leakage-safe default: only information available at the pre-operative MRI.
+# Groups: demographics (Age, Sex) | history (biopsy before imaging) | molecular (IDH, 1p/19q, MGMT) | surgical (EOR)
+clinical:
+  groups: [demographics]
+  allow_leakage: false
+
+radiomics:
+  csv: null                        # output of scripts/extract_radiomics.py
+  k: 30                            # SelectKBest fitted on the training split only
+  select_task: grade
+
+data:
+  num_samples: 2
+  crop:
+    pos: 1.0                       # tumour-centred training crops (thesis: pos=1, neg=1 -> half background)
+    neg: 0.0
+  crop_mask_key: label             # eval crop centre: label = oracle GT mask | pred_mask = predicted mask
+  pred_mask_dir: null              # set when crop_mask_key=pred_mask (scripts/evaluate_segmentation.py --save-predictions)
+  model_mask_key: label            # mask passed to the model when model.mask_mode=input
+
+model:
+  in_channels: 1
+  feature_size: 48
+  use_checkpoint: true
+  backbone_checkpoint: runs/seg_swin_unetr_ssl/best.pt   # segmentation model trained on the shared split
+  freeze_backbone: false
+  encoder_stages: [4]              # 0..4; [2, 3, 4] = thesis multi-scale variant
+  use_decoder_token: true
+  mask_mode: soft                  # soft | hard | input | none
+  fusion: transformer              # transformer | cross_attention | concat
+  d_model: 128
+  n_heads: 4
+  num_layers: 2
+  dropout: 0.3
+  modality_dropout: 0.3
+  aux_heads: true
+
+loss:
+  kind: focal                      # focal | ce
+  gamma: 2.0
+  task_weights: {grade: 1.0, diagnosis: 0.5}
+  seg_weight: 1.0                  # keep the segmentation head trained while fine-tuning
+  aux_weight: 0.3
+  supcon_weight: 0.0
+
+train:
+  epochs: 100
+  lr: 2.0e-4                       # heads
+  lr_backbone: 1.0e-5
+  weight_decay: 0.05
+  warmup_epochs: 5
+  accumulation: 8
+  amp: true
+
+selection:
+  metric: val_loss                 # val_loss | mean_macro_f1 | grade_macro_f1 | ...
+  ema: 0.6                         # smooth the noisy 24-patient validation curve before picking a checkpoint
+  patience: 25

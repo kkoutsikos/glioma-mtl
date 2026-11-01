@@ -1,0 +1,41 @@
+# Imaging data and derived artefacts never go into git
+data/raw/
+data/cache/
+data/predictions/
+*.nii
+*.nii.gz
+*.mha
+*.nrrd
+
+# Clinical metadata: keep it out of the repo, only commit the split ID lists
+data/metadata/*.csv
+!data/metadata/.gitkeep
+
+# Training outputs
+runs/
+outputs/
+*.pt
+*.pth
+*.ckpt
+lightning_logs/
+tb_logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

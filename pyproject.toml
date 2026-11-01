@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glioma-mtl"
+version = "0.1.0"
+description = "Self-supervised pretraining, segmentation and multi-task grade/diagnosis classification of diffuse gliomas on UCSF-PDGM MRI."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.1",
+    "monai[nibabel,einops,tqdm]>=1.3",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.2",
+    "scipy>=1.10",
+    "pyyaml>=6.0",
+    "matplotlib>=3.7",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+radiomics = ["pyradiomics>=3.1", "SimpleITK>=2.2"]
+boosting = ["xgboost>=2.0"]
+dev = ["pytest>=7.0", "nbstripout>=0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

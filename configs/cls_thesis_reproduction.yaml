@@ -1,0 +1,28 @@
+inherit: cls_mask_guided.yaml
+name: cls_thesis_reproduction
+
+# Reproduces the thesis "Advanced Mask-Guided MTL" setting *including its known problems*, for comparison only.
+#   - molecular + surgical clinical inputs (label leakage for grade/diagnosis)
+#   - fixed-window intensity scaling, 50% background training crops
+# Results from this config must not be reported as imaging performance.
+# Use a backbone trained with the same `range` intensity scaling; a z-scored backbone sees mismatched inputs.
+# For the paper's leaky reference row use cls_leaky_reference.yaml instead (corrected pipeline).
+
+clinical:
+  groups: [demographics, history, molecular, surgical]
+  allow_leakage: true
+
+data:
+  intensity:
+    kind: range
+  crop:
+    pos: 1.0
+    neg: 1.0
+
+model:
+  mask_mode: hard
+  modality_dropout: 0.4
+
+selection:
+  metric: mean_macro_f1
+  ema: 0.0

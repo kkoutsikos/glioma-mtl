@@ -1,0 +1,8 @@
+inherit: cls_mask_guided.yaml
+name: cls_idh_radiogenomics
+
+# Predict IDH mutation status from imaging (+ age/sex): a clinically meaningful, leakage-free target.
+tasks: [idh]
+
+loss:
+  task_weights: {idh: 1.0}

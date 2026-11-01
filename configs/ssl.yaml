@@ -1,0 +1,26 @@
+inherit: base.yaml
+name: ssl_swin_unetr
+
+model:
+  feature_size: 48
+  projection_dim: 128
+  mask_ratio: 0.6
+  mask_patch_size: 16   # cube masking; null = independent voxels (thesis setting, weak pretext task)
+  use_checkpoint: true
+
+loss:
+  temperature: 0.5
+  weights:              # 0 switches a branch off entirely
+    mae: 1.0
+    rotation: 0.5       # the thesis' final run used 0, so its rotation head never trained
+    contrastive: 1.0    # NB: with batch_size 2 there are only 2 negatives; accumulation does not add more
+    light: 0.1
+
+train:
+  epochs: 100
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_epochs: 5
+  accumulation: 16
+  amp: true
+  patience: 20

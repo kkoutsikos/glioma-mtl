@@ -1,0 +1,6 @@
+inherit: seg_swin_unetr.yaml
+name: seg_swin_unetr_ssl
+
+model:
+  init:
+    encoder: runs/ssl_swin_unetr/best.pt

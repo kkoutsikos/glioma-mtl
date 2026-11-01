@@ -1,0 +1,19 @@
+inherit: base.yaml
+name: kfold_cv
+
+tasks: [grade, diagnosis, idh]
+
+radiomics:
+  csv: null          # runs/radiomics/radiomics_pred.csv (predicted masks) or radiomics_label.csv (oracle)
+  k: 30              # SelectKBest per training fold
+deep_features:
+  csv: null          # runs/deep_features/deep_features_pred.csv (scripts/extract_deep_features.py)
+  k: 32              # SelectKBest per training fold (raw dim = 192 + 384 + 768 + 48)
+
+cv:
+  folds: 5
+  repeats: 10
+  models: [logreg, random_forest, xgboost]   # 'majority' is always included as a floor
+  feature_sets: null                         # null = all available, see scripts/kfold_cv.py
+  logreg_C: 0.5
+  xgboost: {n_estimators: 200, max_depth: 4, learning_rate: 0.05}
