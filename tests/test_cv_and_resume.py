@@ -1,16 +1,21 @@
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import VarianceThreshold
 
+from glioma_mtl.engine import train_segmentation
 from glioma_mtl.engine.common import AmpStepper, BestTracker, make_optimizer, make_scheduler, save_last, try_resume
 from glioma_mtl.features import extract_deep_features
 from glioma_mtl.models import build_swin_unetr
+from glioma_mtl.models.segmentation import build_segmentation_model
 from glioma_mtl.radiomics import TopK
+from glioma_mtl.utils import CSVLogger
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -34,6 +39,51 @@ def test_topk_survives_dropped_columns_and_picks_informative():
 def test_holm_correction():
     holm = _load_script("aggregate_results").holm
     assert np.allclose(holm([0.01, 0.04, 0.03]), [0.03, 0.06, 0.06])
+
+
+def test_csv_logger_keeps_columns_that_appear_later_and_across_resumes(tmp_path):
+    path = tmp_path / "history.csv"
+    log = CSVLogger(path)
+    log.log({"epoch": 1, "train_loss": 0.9})                       # no validation in epoch 1
+    log.log({"epoch": 2, "train_loss": 0.8, "val_dice": 0.5})
+    CSVLogger(path).log({"epoch": 3, "train_loss": 0.7, "val_dice": 0.6, "gpu": "x"})   # resumed run
+    df = pd.read_csv(path)
+    assert df.columns.tolist() == ["epoch", "train_loss", "val_dice", "gpu"]
+    assert df["val_dice"].tolist()[1:] == [0.5, 0.6] and np.isnan(df["val_dice"][0])
+    assert df["train_loss"].tolist() == [0.9, 0.8, 0.7]
+
+
+def test_segmentation_history_has_validation_and_cost_columns(tmp_path):
+    model = build_segmentation_model({"name": "unet", "channels": [4, 8], "strides": [2], "num_res_units": 1})
+    label = torch.zeros(1, 1, 32, 32, 32)
+    label[..., 8:20, 8:20, 8:20] = 1
+    batch = {"image": torch.randn(1, 1, 32, 32, 32), "label": label, "patient_id": ["p1"]}
+    cfg = {"train": {"epochs": 3, "lr": 1e-3, "val_every": 2, "amp": False}, "data": {"roi_size": [32, 32, 32]}}
+    train_segmentation(model, [batch], [batch], cfg, tmp_path, torch.device("cpu"))
+    df = pd.read_csv(tmp_path / "history.csv")
+    assert df["val_dice"].notna().tolist() == [False, True, True]   # epochs 2 and 3 (last) validate
+    assert (df["epoch_seconds"] > 0).all() and (df["gpu"] == "cpu").all()
+    info = json.loads((tmp_path / "model_info.json").read_text())
+    assert info["params"] == sum(p.numel() for p in model.parameters()) == info["trainable_params"]
+
+
+def test_segmentation_table_reports_cost(tmp_path):
+    agg = _load_script("aggregate_results")
+    rng = np.random.default_rng(0)
+    for name, dice, params in (("seg_a", 0.9, 2e6), ("seg_b", 0.8, 5e6)):
+        run = tmp_path / f"{name}_s42"
+        run.mkdir()
+        pd.DataFrame({"patient_id": [f"p{i}" for i in range(12)], "dice": dice + rng.normal(0, 0.01, 12),
+                      "hd95": 5.0 + rng.normal(0, 0.5, 12), "nsd": 0.9, "iou": 0.8, "sensitivity": 0.9, "precision": 0.9,
+                      "seconds": 1.5}).to_csv(run / "per_case_segmentation_test.csv", index=False)
+        (run / "model_info.json").write_text(json.dumps({"params": params, "trainable_params": params, "gpu": "A100"}))
+        pd.DataFrame({"epoch": [1, 2], "epoch_seconds": [1800, 1800], "peak_mem_gb": [7.0, 7.5],
+                      "gpu": "A100"}).to_csv(run / "history.csv", index=False)
+    table, _ = agg.segmentation_table({"segmentation": {"models": {"seg_a": {}, "seg_b": {}}, "seeds": [42]}}, tmp_path)
+    row = table.set_index("model").loc["seg_b"]
+    assert (row["params_M"], row["train_h"], row["peak_mem_gb"], row["infer_s_per_case"], row["gpu"]) == \
+        ("5.0", "1.0", "7.5", "1.50", "A100")
+    assert table.set_index("model").loc["seg_a", "p_dice_vs_best"] == "best"
 
 
 def test_resume_restores_training_state(tmp_path):

@@ -3,7 +3,8 @@
     python scripts/aggregate_results.py --plan configs/paper.yaml --root runs/paper --out runs/paper/paper_tables
 
 * Segmentation: mean ± SD of the per-seed test means; 95% bootstrap CI over patients (seed-averaged);
-  paired Wilcoxon of every model vs. the best one (Holm-corrected).
+  paired Wilcoxon of every model vs. the best one (Holm-corrected); parameters, training time, peak GPU
+  memory, inference time per case and the GPU used.
 * Classification: mean ± SD over seeds, plus the seed ensemble (averaged probabilities) with a 95%
   bootstrap CI over the 25 test patients.
 * K-fold late fusion: mean ± SD over the CV folds, and the one-shot hold-out result with its CI.
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import torch  # noqa: F401  (load before pandas; see src/glioma_mtl/__init__.py)
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -65,12 +67,33 @@ def save(df: pd.DataFrame, out: Path, name: str, caption: str) -> str:
     return f"## {caption}\n\n{to_markdown(df)}\n"
 
 
+def run_cost(run_dir: Path) -> dict:
+    """Parameters, training time, peak GPU memory and GPU of one run, from model_info.json + history.csv."""
+    out: dict = {}
+    info = run_dir / "model_info.json"
+    if info.exists():
+        d = json.loads(info.read_text(encoding="utf-8"))
+        out["params_M"], out["gpu"] = d["params"] / 1e6, d.get("gpu")
+    hist = run_dir / "history.csv"
+    if hist.exists():
+        h = pd.read_csv(hist)
+        if "epoch_seconds" in h:
+            out["train_h"] = h["epoch_seconds"].sum() / 3600
+        if "peak_mem_gb" in h:
+            out["peak_mem_gb"] = h["peak_mem_gb"].max()
+        if "gpu" in h:  # several names = the run resumed on another GPU type, so train_h mixes speeds
+            out["gpu"] = " + ".join(sorted(h["gpu"].dropna().astype(str).unique()))
+    return out
+
+
 def segmentation_table(plan: dict, root: Path) -> tuple[pd.DataFrame, pd.DataFrame] | None:
     seg = plan["segmentation"]
     per_model: dict[str, list[pd.DataFrame]] = {}
+    costs: dict[str, list[dict]] = {}
     for model in seg["models"]:
         runs = [root / f"{model}_s{s}" / "per_case_segmentation_test.csv" for s in seg.get("seeds", [42])]
         found = [pd.read_csv(p) for p in runs if p.exists()]
+        costs[model] = [run_cost(p.parent) for p in runs if p.exists()]
         if found:
             per_model[model] = found
         else:
@@ -103,6 +126,13 @@ def segmentation_table(plan: dict, root: Path) -> tuple[pd.DataFrame, pd.DataFra
         p = pvals.get(model)
         row["p_dice_vs_best"] = "best" if model == best else f"{p[0]:.3g}"
         row["p_hd95_vs_best"] = "best" if model == best else f"{p[1]:.3g}"
+        # Compute cost: mean over seeds; inference = median whole-volume sliding-window seconds per case
+        cost = pd.DataFrame(costs[model])
+        for col, digits in (("params_M", 1), ("train_h", 1), ("peak_mem_gb", 1)):
+            row[col] = fmt(cost[col].mean(), digits=digits) if col in cost else "–"
+        seconds = pd.concat(frames)["seconds"] if all("seconds" in f for f in frames) else pd.Series(dtype=float)
+        row["infer_s_per_case"] = fmt(seconds.median(), digits=2) if len(seconds) else "–"
+        row["gpu"] = " + ".join(sorted(cost["gpu"].dropna().unique())) if "gpu" in cost else "–"
         rows.append(row)
     return pd.DataFrame(rows), pd.concat({m: a for m, a in averaged.items()}, names=["model"]).reset_index(0)
 

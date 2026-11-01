@@ -106,11 +106,13 @@ def train_classifier(model: MultiTaskGliomaNet, train_loader, val_loader, loss_f
     history = CSVLogger(out_dir / "history.csv")
     last = out_dir / "last.pt"
     start_epoch = try_resume(last, model, optimizer, scheduler, stepper, tracker, tcfg.get("resume", True))
+    cost = EpochCost(model, device, out_dir)
 
     for epoch in range(start_epoch, epochs):
         if tracker.should_stop:
             LOG.info("Early stopping at epoch %d (best %d)", epoch + 1, tracker.best_epoch + 1)
             break
+        cost.start()
         model.train()
         totals: dict[str, float] = defaultdict(float)
         n = 0
@@ -134,6 +136,7 @@ def train_classifier(model: MultiTaskGliomaNet, train_loader, val_loader, loss_f
         if tracker.update(value, epoch):
             save_checkpoint(out_dir / "best.pt", model, epoch=epoch, metrics=row)
             val_df.to_csv(out_dir / "val_predictions_best.csv", index=False)
+        row.update(cost.stop())
         save_last(last, model, optimizer, scheduler, stepper, tracker, epoch, metrics=row)
         history.log(row)
         LOG.info(format_row(row))

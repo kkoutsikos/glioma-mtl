@@ -97,19 +97,33 @@ def format_row(row: Mapping[str, Any]) -> str:
 
 
 class CSVLogger:
-    """Append one row per epoch; the header is taken from the first row."""
+    """Append one row per epoch. Columns are the union of all rows logged so far (also across resumes).
+
+    A key that first appears in a later row (e.g. ``val_dice`` when validation runs every few epochs)
+    adds a column and the file is rewritten, so nothing is dropped and old rows get an empty cell.
+    """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fields: list[str] | None = None
+
+    def _read(self) -> tuple[list[str], list[dict]]:
+        if not self.path.exists():
+            return [], []
+        with open(self.path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            return list(reader.fieldnames or []), list(reader)
 
     def log(self, row: Mapping[str, Any]) -> None:
-        new_file = not self.path.exists()
-        if self._fields is None:
-            self._fields = list(row.keys())
-        with open(self.path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self._fields, extrasaction="ignore")
-            if new_file:
+        fields, rows = self._read()
+        new = [k for k in row if k not in fields]
+        if new or not fields:
+            fields += new
+            rows.append(dict(row))
+            with open(self.path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
                 writer.writeheader()
-            writer.writerow(row)
+                writer.writerows(rows)
+        else:
+            with open(self.path, "a", newline="", encoding="utf-8") as f:
+                csv.DictWriter(f, fieldnames=fields).writerow(row)

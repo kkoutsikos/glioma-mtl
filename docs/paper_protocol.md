@@ -65,6 +65,7 @@ reference rows.
 | Where | What |
 |---|---|
 | `<run>/best.pt`, `config.yaml`, `history.csv`, `log.txt` | weights, the exact config, per-epoch metrics and log of every SSL, segmentation and classifier run (`last.pt` is removed once a run finishes) |
+| `<run>/model_info.json`, `history.csv` columns `epoch_seconds`, `peak_mem_gb`, `gpu` | compute cost of every segmentation and classifier run: parameter count, wall time and peak GPU memory per epoch, GPU type (the segmentation table reports them next to inference time per case) |
 | `<seg run>/per_case_segmentation_test.csv`, `summary_*.csv` | per-patient Dice / IoU / HD95 / NSD / sensitivity / precision; bootstrap summary |
 | `predictions/<backbone>/` | predicted tumour masks (NIfTI, original grid) of the classification cohort |
 | `<cls run>/predictions_test.csv`, `metrics_test.csv`, `val_predictions_best.csv`, `featurizers.pkl` | test probabilities and metrics with CIs; fitted clinical / radiomics preprocessing |

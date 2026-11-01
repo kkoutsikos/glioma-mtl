@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from ..evaluation.segmentation import evaluate_segmentation
 from ..utils import LOG, CSVLogger, format_row, save_checkpoint
-from .common import AmpStepper, BestTracker, make_optimizer, make_scheduler, save_last, try_resume
+from .common import AmpStepper, BestTracker, EpochCost, make_optimizer, make_scheduler, save_last, try_resume
 
 
 def train_segmentation(model: torch.nn.Module, train_loader, val_loader, cfg: Mapping, out_dir: str | Path,
@@ -28,11 +28,13 @@ def train_segmentation(model: torch.nn.Module, train_loader, val_loader, cfg: Ma
     history = CSVLogger(out_dir / "history.csv")
     last = out_dir / "last.pt"
     start_epoch = try_resume(last, model, optimizer, scheduler, stepper, tracker, tcfg.get("resume", True))
+    cost = EpochCost(model, device, out_dir)
 
     for epoch in range(start_epoch, epochs):
         if tracker.should_stop:
             LOG.info("Early stopping at epoch %d (best epoch %d)", epoch + 1, tracker.best_epoch + 1)
             break
+        cost.start()
         model.train()
         running, steps = 0.0, 0
         for batch in tqdm(train_loader, desc=f"epoch {epoch + 1}/{epochs}", leave=False):
@@ -54,6 +56,7 @@ def train_segmentation(model: torch.nn.Module, train_loader, val_loader, cfg: Ma
             if tracker.update(row["val_dice"], epoch):
                 save_checkpoint(out_dir / "best.pt", model, epoch=epoch, metrics=row)
                 LOG.info("epoch %d: new best val Dice %.4f", epoch + 1, row["val_dice"])
+        row.update(cost.stop())
         save_last(last, model, optimizer, scheduler, stepper, tracker, epoch)
         history.log(row)
         LOG.info(format_row(row))

@@ -6,7 +6,8 @@
 
 Each step is a subprocess call of one of the scripts in this folder. A finished step writes a marker
 in ``<output_root>/.done/``, so re-running skips it; training scripts themselves resume from
-``last.pt``. Use ``--redo STEP_ID`` to force a step again.
+``last.pt``. Use ``--redo STEP_ID`` to force a step again. ``aggregate`` and ``figures`` never get a
+marker: they rerun every time they are selected, so they always reflect the finished runs.
 
 Stages: splits, ssl, seg, predict, features, cls, kfold, aggregate.
 """
@@ -35,6 +36,7 @@ class Step:
     optional: bool = False
     needs: list[str] = field(default_factory=list)  # step ids that must have succeeded
     run_dir: Path | None = None                     # training steps: where last.pt lives
+    always: bool = False                            # summary steps: rerun whenever selected, no marker
 
 
 def _script(name: str) -> str:
@@ -154,9 +156,11 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                                              *sets(kfold.get("overrides"), extra)], needs=needs))
 
     steps.append(Step("aggregate", "aggregate", [_script("aggregate_results.py"), "--plan", "PLAN",
-                                                 "--root", root.as_posix(), "--out", (root / "paper_tables").as_posix()]))
+                                                 "--root", root.as_posix(), "--out", (root / "paper_tables").as_posix()],
+                      always=True))
     steps.append(Step("figures", "figures", [_script("make_figures.py"), "--plan", "PLAN", "--root", root.as_posix(),
-                                             "--out", (root / "paper_figures").as_posix(), "--qualitative"]))
+                                             "--out", (root / "paper_figures").as_posix(), "--qualitative"],
+                      always=True))
     return steps, root
 
 
@@ -184,7 +188,8 @@ def main() -> None:
     for step in steps:
         marker = done_dir / (step.id.replace(":", "__") + ".done")
         selected = step.stage in args.stages and (args.only is None or step.id in args.only)
-        if marker.exists() and step.id not in args.redo:
+        # Tables and figures summarise whatever has finished so far, so a marker must never freeze them.
+        if marker.exists() and step.id not in args.redo and not step.always:
             status[step.id] = "done"
             continue
         if not selected:
@@ -204,7 +209,8 @@ def main() -> None:
         code = subprocess.call(cmd, env=env)
         minutes = (time.time() - start) / 60
         if code == 0:
-            marker.write_text(f"{time.ctime()} ({minutes:.1f} min)\n")
+            if not step.always:
+                marker.write_text(f"{time.ctime()} ({minutes:.1f} min)\n")
             status[step.id] = "ok"
             print(f"[ok]  {step.id} in {minutes:.1f} min")
             # last.pt (weights + optimizer, ~750 MB for SwinUNETR) is only needed to resume an unfinished

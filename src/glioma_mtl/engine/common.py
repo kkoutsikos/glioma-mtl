@@ -1,13 +1,51 @@
-"""Shared training utilities: optimiser/scheduler factories, AMP step, best-model tracking."""
+"""Shared training utilities: optimiser/scheduler factories, AMP step, best-model tracking, cost logging."""
 from __future__ import annotations
 
+import json
 import math
+import time
 from pathlib import Path
 from typing import Iterable, Mapping
 
 import torch
 
 from ..utils import LOG, save_checkpoint
+
+
+def count_parameters(model: torch.nn.Module) -> dict[str, int]:
+    params = list(model.parameters())
+    return {"params": sum(p.numel() for p in params),
+            "trainable_params": sum(p.numel() for p in params if p.requires_grad)}
+
+
+class EpochCost:
+    """Compute cost for the paper: wall time and peak GPU memory of each epoch (training + validation).
+
+    The parameter count and GPU are written once to ``model_info.json``. Each epoch row also records the
+    GPU, so a run that resumed on a different GPU type is visible in ``history.csv``.
+    """
+
+    def __init__(self, model: torch.nn.Module, device: torch.device, out_dir: str | Path):
+        self.device = device
+        self.gpu = torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"
+        info = {**count_parameters(model), "gpu": self.gpu}
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        (Path(out_dir) / "model_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+        LOG.info("%s: %.2fM parameters (%.2fM trainable) on %s", model.__class__.__name__,
+                 info["params"] / 1e6, info["trainable_params"] / 1e6, self.gpu)
+        self._start = time.perf_counter()
+
+    def start(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
+        self._start = time.perf_counter()
+
+    def stop(self) -> dict[str, float | str]:
+        out: dict[str, float | str] = {"epoch_seconds": time.perf_counter() - self._start}
+        if self.device.type == "cuda":
+            out["peak_mem_gb"] = torch.cuda.max_memory_allocated(self.device) / 1024 ** 3
+        out["gpu"] = self.gpu
+        return out
 
 
 def make_optimizer(param_groups: Iterable, cfg: Mapping) -> torch.optim.Optimizer:
