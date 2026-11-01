@@ -88,6 +88,9 @@ def grad_cam(model: MultiTaskGliomaNet, image: torch.Tensor, tabular: Mapping | 
              layer: str = "decoder", target: int | None = None, mask: torch.Tensor | None = None):
     """3D Grad-CAM for one sample (batch of 1). Returns ``(cam [D,H,W] in [0, 1], probs, class)``."""
     model.eval()
+    # A frozen backbone has requires_grad=False weights; an input that requires grad still gives the
+    # activations a graph, so Grad-CAM works without touching the weights.
+    image = image.detach().requires_grad_(True)
     with _unfrozen(model), torch.enable_grad():
         enc = model.encode(image, tabular, mask)
         fmap = enc["feats"].decoder if layer == "decoder" else enc["feats"].hidden[int(layer.removeprefix("stage"))]

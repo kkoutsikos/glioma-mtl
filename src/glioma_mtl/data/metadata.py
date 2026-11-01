@@ -41,12 +41,14 @@ DIAGNOSIS_CLASSES: tuple[str, ...] = (
     "Oligodendroglioma, IDH-mutant, 1p/19q-codeleted",
 )
 IDH_CLASSES: tuple[str, ...] = ("mutant", "wildtype")
+LGG_HGG_CLASSES: tuple[str, ...] = ("LGG (grade 2-3)", "HGG (grade 4)")
 
 # task name -> (label column, class list)
 TASKS = {
     "grade": ("grade_label", GRADE_CLASSES),
     "diagnosis": ("diagnosis_label", DIAGNOSIS_CLASSES),
     "idh": ("idh_label", IDH_CLASSES),
+    "lgg_hgg": ("lgg_hgg_label", LGG_HGG_CLASSES),
 }
 
 FEATURE_GROUPS: dict[str, dict[str, list[str]]] = {
@@ -113,6 +115,7 @@ def encode_targets(df: pd.DataFrame) -> pd.DataFrame:
     out["grade_label"] = out["Grade"].map({g: i for i, g in enumerate(GRADE_CLASSES)}).fillna(-1).astype(int)
     out["diagnosis_label"] = out["Diagnosis"].map({d: i for i, d in enumerate(DIAGNOSIS_CLASSES)}).fillna(-1).astype(int)
     out["idh_label"] = out["IDH_Status"].map({c: i for i, c in enumerate(IDH_CLASSES)}).fillna(-1).astype(int)
+    out["lgg_hgg_label"] = out["Grade"].map({2: 0, 3: 0, 4: 1}).fillna(-1).astype(int)
     return out
 
 

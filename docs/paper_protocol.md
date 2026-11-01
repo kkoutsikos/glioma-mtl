@@ -44,7 +44,7 @@ These further changes are improvements rather than error fixes. State them in th
 | `seg` | the 5 thesis architectures (SwinUNETR scratch / +SSL, SegResNet, 3D U-Net, SegMamba) + the 3D U-Net in its thesis configuration, × seeds | which architecture segments whole tumour best on T2; does SSL help (`seg_swin_unetr` vs `seg_swin_unetr_ssl`); was the thesis U-Net result a configuration problem (`seg_unet` vs `seg_unet_thesis`) | `segmentation` |
 | `predict` | backbone on classification train/val/test | predicted masks for crop localisation, deep features, radiomics | – |
 | `features` | 1 + 1 | label-free deep features, radiomics from predicted masks | – |
-| `cls` | 3 experiments × 3 seeds | what imaging adds for grade / diagnosis; what molecular data explain (reference) | `classification` |
+| `cls` | 8 experiments × 3 seeds: image only, image + age/sex, leaky reference, and the corrected thesis variants (cascade, multi-scale, radiomics token, Trinity, SegMamba backbone) | what imaging adds for grade / diagnosis / LGG vs HGG; which fusion design helps; what molecular data explain (reference) | `classification` |
 | `explain` | first seed of each classifier | which modality / image scale drives each prediction: fusion attention, token occlusion, 3D Grad-CAM per test patient | figures |
 | `kfold` | repeated 5-fold × 10 + hold-out | XGBoost / logistic regression / RF late fusion of demographics, radiomics and deep features; tabular baselines; XGBoost TreeSHAP per modality | `kfold_cv`, `kfold_holdout` |
 | `aggregate` | – | writes all tables (CSV, Markdown, LaTeX) | – |
@@ -85,14 +85,17 @@ Estimated from your thesis Colab logs (T4, 15 GB). An A100 or L4 is roughly 2–
 | 3D U-Net (wider + thesis configuration) | ~4–6 h | 2 | ~10 h |
 | SegMamba (+ one-time CUDA build, ~10–20 min) | ~8 h | 1 | ~8 h |
 | Predicted masks + features | ~0.5 h | 1 | ~0.5 h |
-| Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 9 | ~20–40 h |
-| k-fold CV (CPU) | minutes | 1 | – |
+| Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 8 experiments × 3 seeds = 24 | ~50–100 h |
+| Explanations (Grad-CAM per test patient) | ~10–20 min | 8 | ~2 h |
+| k-fold CV (CPU, with MLP) | ~0.5–1 h | 1 | ~1 h |
 
-Roughly 75–95 T4-hours for one segmentation seed. Ways to trim, in order of least harm (the
-segmentation benchmark keeps all thesis models):
+Roughly 130–200 T4-hours in total, about half of it the classifiers. With this many runs an L4 or A100
+is worth it (roughly 65–100 or 30–60 h). Ways to trim, in order of least harm (the segmentation
+benchmark and the classifier variants all stay in):
 
-1. SSL to 30 epochs;
-2. 2 classification seeds;
+1. the five thesis-variant classifiers with 2 seeds instead of 3 (`seeds: [42, 43]` on each of those
+   experiments in `configs/paper.yaml`), keeping 3 for the main comparison;
+2. SSL to 30 epochs;
 3. classifier epochs to 60.
 
 **On Colab.** A T4 (15 GB) is enough: the thesis ran the same model sizes on one, and here fp16

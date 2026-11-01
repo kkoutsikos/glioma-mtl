@@ -29,6 +29,41 @@ class SwinOutputs(NamedTuple):
     decoder: torch.Tensor         # [B, feature_size, D, H, W], input of the final 1x1 conv
 
 
+class SegMambaFeatures:
+    """Feature access for SegMamba (github.com/ge-xing/SegMamba) through forward hooks.
+
+    SegMamba is third-party code whose forward we cannot safely re-implement, so its features are read
+    from the modules the thesis used: ``vit`` (Mamba encoder, 4 stages at /2../16), ``encoder5`` (the
+    ``hidden_size`` bottleneck) and the input of ``out`` (decoder features). Returned in the same
+    layout as :func:`swin_unetr_forward`: hidden = [stage0, stage1, stage2, stage3, bottleneck]. Any
+    missing module or unexpected output raises; channel counts are checked by the classifier.
+    """
+
+    MODULES = ("vit", "encoder5", "out")
+
+    def __init__(self, model: torch.nn.Module):
+        missing = [n for n in self.MODULES if not hasattr(model, n)]
+        if missing:
+            raise RuntimeError(f"SegMamba model has no {missing}; expected the ge-xing/SegMamba module layout")
+        self.store: dict = {}
+        model.vit.register_forward_hook(lambda m, i, o: self.store.__setitem__("vit", o))
+        model.encoder5.register_forward_hook(lambda m, i, o: self.store.__setitem__("bottleneck", o))
+        model.out.register_forward_hook(lambda m, i, o: self.store.__setitem__("decoder", i[0]))
+
+    def __call__(self, model: torch.nn.Module, x: torch.Tensor) -> "SwinOutputs":
+        self.store.clear()
+        logits = model(x)
+        stages = self.store.get("vit")
+        if not isinstance(stages, (list, tuple)) or len(stages) < 4 or "bottleneck" not in self.store:
+            raise RuntimeError(f"unexpected SegMamba encoder output: {type(stages).__name__} "
+                               f"of length {len(stages) if isinstance(stages, (list, tuple)) else '-'}")
+        return SwinOutputs(logits, [*stages[:4], self.store["bottleneck"]], self.store["decoder"])
+
+
+def segmamba_stage_channels(feat_size, hidden_size: int = 768) -> list[int]:
+    return [*list(feat_size)[:4], hidden_size]
+
+
 def swin_unetr_forward(model: SwinUNETR, x: torch.Tensor) -> SwinOutputs:
     """Same computation as ``SwinUNETR.forward`` (MONAI >= 1.3), exposing intermediate features."""
     hidden = model.swinViT(x, model.normalize)

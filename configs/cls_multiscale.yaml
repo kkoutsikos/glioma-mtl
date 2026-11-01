@@ -1,0 +1,11 @@
+inherit: cls_mask_guided.yaml
+name: cls_multiscale
+
+# Thesis "Multi-scale mask-guided": encoder stages 2, 3, 4 (192 / 384 / 768 channels) + decoder token,
+# pooled inside the binary predicted tumour. In the thesis this model's backbone checkpoint silently failed
+# to load (it trained from random weights); here the segmentation backbone is loaded and checked.
+model:
+  encoder_stages: [2, 3, 4]
+  use_decoder_token: true
+  mask_mode: hard
+  modality_dropout: 0.4

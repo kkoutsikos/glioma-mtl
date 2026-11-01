@@ -36,7 +36,8 @@ def build_segmentation_model(cfg: Mapping, in_channels: int = 1, out_channels: i
         except ImportError as e:
             raise ImportError("SegMamba not importable; see the comment in build_segmentation_model") from e
         return SegMamba(in_chans=in_channels, out_chans=out_channels, depths=list(cfg.get("depths", [2, 2, 2, 2])),
-                        feat_size=list(cfg.get("feat_size", [48, 96, 192, 384])))
+                        feat_size=list(cfg.get("feat_size", [48, 96, 192, 384])),
+                        hidden_size=cfg.get("hidden_size", 768))
     raise ValueError(f"Unknown segmentation model {name!r}")
 
 

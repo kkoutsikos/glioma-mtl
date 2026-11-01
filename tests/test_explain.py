@@ -58,6 +58,14 @@ def test_grad_cam_shape_and_range():
     assert not model.freeze_backbone          # Grad-CAM's temporary unfreeze is undone
 
 
+def test_grad_cam_works_on_a_frozen_backbone():
+    model = _model(fusion="concat", mask_mode="none", freeze_backbone=True, use_decoder_token=False)
+    image, tab = _inputs()
+    cam, _, _ = grad_cam(model, image, tab, "grade", "stage4")
+    assert np.isclose(cam.max(), 1.0)
+    assert all(not p.requires_grad and p.grad is None for p in model.backbone.parameters())  # weights untouched
+
+
 def test_grad_cam_refuses_maps_the_classifier_does_not_use():
     model = _model(mask_mode="none", encoder_stages=[4], use_decoder_token=False)
     image, tab = _inputs()

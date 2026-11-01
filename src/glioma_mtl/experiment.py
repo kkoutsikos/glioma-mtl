@@ -110,7 +110,9 @@ def build_classifier(cfg: Mapping, data: ClassificationData):
         encoder_stages=m["encoder_stages"], use_decoder_token=m["use_decoder_token"], mask_mode=m["mask_mode"],
         fusion=m["fusion"], d_model=m["d_model"], n_heads=m["n_heads"], num_layers=m["num_layers"],
         dropout=m["dropout"], modality_dropout=m.get("modality_dropout", 0.0), aux_heads=m.get("aux_heads", True),
-        freeze_backbone=m.get("freeze_backbone", False))
+        freeze_backbone=m.get("freeze_backbone", False), backbone=m.get("backbone", "swin_unetr"),
+        backbone_cfg=m.get("backbone_cfg"), peritumoral=m.get("peritumoral", False),
+        peritumoral_dilation=m.get("peritumoral_dilation", 5))
 
 
 def build_classification_loss(cfg: Mapping, data: ClassificationData):

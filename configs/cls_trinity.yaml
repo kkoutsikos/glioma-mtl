@@ -1,0 +1,19 @@
+inherit: cls_mask_guided.yaml
+name: cls_trinity
+
+# Thesis "Trinity": cross-attention between the task queries and the image / clinical / radiomics tokens,
+# image tokens from encoder stages 1-3 (96 / 192 / 384 channels, as the thesis intended), deep supervision on
+# the stage tokens and a supervised-contrastive term. In the thesis all image tokens were zero tensors
+# (hooked layers had twice the expected channels); here they are real, checked features.
+model:
+  fusion: cross_attention
+  encoder_stages: [1, 2, 3]
+  use_decoder_token: false
+  mask_mode: soft
+  n_heads: 8
+loss:
+  aux_weight: 0.2
+  supcon_weight: 0.1
+radiomics:
+  k: 30
+  select_task: grade

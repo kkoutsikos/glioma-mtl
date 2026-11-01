@@ -1,7 +1,7 @@
 inherit: base.yaml
 name: kfold_cv
 
-tasks: [grade, diagnosis, idh]
+tasks: [grade, diagnosis, idh, lgg_hgg]
 
 radiomics:
   csv: null          # runs/radiomics/radiomics_pred.csv (predicted masks) or radiomics_label.csv (oracle)
@@ -13,7 +13,9 @@ deep_features:
 cv:
   folds: 5
   repeats: 10
-  models: [logreg, random_forest, xgboost]   # 'majority' is always included as a floor
+  models: [logreg, random_forest, mlp, xgboost]   # 'majority' is always included as a floor
+  mlp_hidden: [64]
+  mlp_alpha: 0.01
   feature_sets: null                         # null = all available, see scripts/kfold_cv.py
   logreg_C: 0.5
   xgboost: {n_estimators: 200, max_depth: 4, learning_rate: 0.05}

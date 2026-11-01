@@ -108,23 +108,30 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
             optional=not (kfold or {}).get("use_radiomics"), needs=predicted))
 
         for exp, spec in (cls.get("experiments") or {}).items():
-            for seed in cls.get("seeds", [42]):
+            exp_seeds = spec.get("seeds", cls.get("seeds", [42]))
+            # Classifier backbone: the shared one, or e.g. seg_segmamba for the SegMamba classifier.
+            # Crops are always centred on the shared backbone's predicted masks, so all classifiers see the same crops.
+            exp_bb = f"{spec.get('backbone', bb_model)}_s{seeds[0]}"
+            exp_ckpt = (root / exp_bb / "best.pt").as_posix()
+            for seed in exp_seeds:
                 name = f"{exp}_s{seed}"
                 run = (root / name).as_posix()
-                extra = [f"seed={seed}", f"name={name}", f"model.backbone_checkpoint={bb_ckpt}",
+                extra = [f"seed={seed}", f"name={name}", f"model.backbone_checkpoint={exp_ckpt}",
                          "data.crop_mask_key=pred_mask", f"data.pred_mask_dir={pred_dir}"]
+                needs = ["predict:val", f"seg_train:{exp_bb}"]
                 if spec.get("use_radiomics"):
                     extra.append(f"radiomics.csv={rad_csv}")
+                    needs.append("features:radiomics")
                 steps.append(Step(f"cls_train:{name}", "cls", [_script("train_classifier.py"), "--config", spec["config"],
                                                               *sets(cls.get("overrides"), extra)],
-                                  optional=spec.get("optional", False), needs=["predict:val"], run_dir=root / name))
+                                  optional=spec.get("optional", False), needs=needs, run_dir=root / name))
                 steps.append(Step(f"cls_eval:{name}", "cls", [_script("evaluate_classifier.py"), "--config",
                                                              f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",
                                                              "--split", "test", "--out-dir", run,
                                                              *sets([], ["data.crop_mask_key=pred_mask",
                                                                         f"data.pred_mask_dir={pred_dir}"])],
                                   optional=spec.get("optional", False), needs=[f"cls_train:{name}", "predict:test"]))
-            first = f"{exp}_s{cls.get('seeds', [42])[0]}"
+            first = f"{exp}_s{exp_seeds[0]}"
             run = (root / first).as_posix()
             steps.append(Step(f"explain:{first}", "explain", [
                 _script("explain_classifier.py"), "--config", f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",

@@ -27,6 +27,7 @@ from sklearn.feature_selection import VarianceThreshold
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import RepeatedStratifiedKFold, cross_validate
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
@@ -59,6 +60,11 @@ def make_models(cfg: dict) -> dict:
         "logreg": lambda: LogisticRegression(max_iter=5000, class_weight="balanced", C=cfg.get("logreg_C", 0.5)),
         "random_forest": lambda: RandomForestClassifier(n_estimators=300, min_samples_leaf=3,
                                                         class_weight="balanced", random_state=0, n_jobs=-1),
+        # Thesis clinical-only MLP; a fixed small network instead of a grid search (the thesis tuned it on a
+        # split that also served as its test set). Early stopping uses an inner 10% of each training fold.
+        "mlp": lambda: MLPClassifier(hidden_layer_sizes=tuple(cfg.get("mlp_hidden", (64,))), alpha=cfg.get("mlp_alpha", 1e-2),
+                                     max_iter=2000, early_stopping=True, validation_fraction=0.1,
+                                     n_iter_no_change=50, random_state=0),
     }
     try:
         from xgboost import XGBClassifier

@@ -16,7 +16,7 @@ from glioma_mtl.cli import start_run
 from glioma_mtl.data.loaders import make_dataset, make_loader
 from glioma_mtl.data.metadata import TASKS
 from glioma_mtl.data.transforms import cls_eval_transforms
-from glioma_mtl.engine import predict, task_arrays
+from glioma_mtl.engine import add_derived_lgg_hgg, predict, task_arrays
 from glioma_mtl.evaluation import classification_metrics
 from glioma_mtl.experiment import build_classifier, classification_data, load_context
 from glioma_mtl.utils import LOG, load_weights
@@ -43,12 +43,14 @@ def main() -> None:
     model.to(device)
 
     preds, _ = predict(model, loader, device, mask_key=d.get("model_mask_key", "label"))
+    preds = add_derived_lgg_hgg(preds)  # LGG vs HGG from the grade head unless the model has its own head
     preds.to_csv(out_dir / f"predictions_{args.split}.csv", index=False)
     tables = []
-    for task in data.tasks:
+    for task in [c[2:] for c in preds.columns if c.startswith("y_")]:
         y, prob = task_arrays(preds, task)
         table, cm = classification_metrics(y, prob, [str(c) for c in TASKS[task][1]], seed=cfg.get("seed", 0))
         table.insert(0, "task", task)
+        table.insert(1, "source", "head" if task in data.tasks else "derived from grade head")
         tables.append(table)
         LOG.info("%s confusion matrix (rows = truth):\n%s", task, np.array2string(cm))
     summary = pd.concat(tables)

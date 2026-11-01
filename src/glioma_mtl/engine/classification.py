@@ -52,6 +52,20 @@ def predict(model: MultiTaskGliomaNet, loader, device: torch.device, loss_fn: Mu
     return pd.DataFrame(rows), float(np.mean(losses)) if losses else float("nan")
 
 
+def add_derived_lgg_hgg(df: pd.DataFrame) -> pd.DataFrame:
+    """LGG (grade 2-3) vs HGG (grade 4) from the 3-way grade head, for models without a dedicated head.
+
+    P(HGG) = P(grade 4). Models trained with an ``lgg_hgg`` task keep their own head's output.
+    """
+    if "y_grade" not in df or "y_lgg_hgg" in df:
+        return df
+    out = df.copy()
+    out["y_lgg_hgg"] = np.where(out["y_grade"] >= 0, (out["y_grade"] == 2).astype(int), -1)
+    out["p_lgg_hgg_0"] = out["p_grade_0"] + out["p_grade_1"]
+    out["p_lgg_hgg_1"] = out["p_grade_2"]
+    return out
+
+
 def task_arrays(df: pd.DataFrame, task: str) -> tuple[np.ndarray, np.ndarray]:
     probs = df[sorted((c for c in df if c.startswith(f"p_{task}_")), key=lambda c: int(c.rsplit("_", 1)[1]))]
     return df[f"y_{task}"].to_numpy(), probs.to_numpy()

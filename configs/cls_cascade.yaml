@@ -1,0 +1,12 @@
+inherit: cls_mask_guided.yaml
+name: cls_cascade
+
+# Thesis "Cascade": frozen segmentation encoder, bottleneck pooled over the whole crop (no tumour mask),
+# concatenated with the clinical vector, MLP heads. The segmentation loss is off because the backbone is frozen.
+model:
+  freeze_backbone: true
+  encoder_stages: [4]
+  use_decoder_token: false
+  mask_mode: none
+  fusion: concat
+  aux_heads: false

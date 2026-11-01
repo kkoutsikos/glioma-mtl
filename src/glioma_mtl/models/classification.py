@@ -1,4 +1,4 @@
-"""Multi-task glioma classifier on a SwinUNETR backbone.
+"""Multi-task glioma classifier on a SwinUNETR or SegMamba backbone.
 
 One configurable module replaces the ~10 copy-pasted variants in ``classification_runs.ipynb``:
 
@@ -10,9 +10,12 @@ Image only          ``tabular_dims={}``
 Transformer fusion  ``fusion=transformer, mask_mode=none``
 Mask-guided         ``fusion=transformer, mask_mode=hard, encoder_stages=[4], use_decoder_token=True``
 Multi-scale         ``encoder_stages=[2, 3, 4]``
+V2 radiomics        ``tabular_dims={'clinical': ..., 'radiomics': ...}``
 V3 soft masking     ``mask_mode=soft``
 Trinity             ``fusion=cross_attention, encoder_stages=[1, 2, 3]`` (here the stage tokens are
                     real features, not zeros)
+SegMamba (v3)       ``backbone=segmamba, encoder_stages=[4], peritumoral=True, mask_mode=hard``:
+                    bottleneck pooled inside the tumour (core) and in a ring around it (peritumoral)
 ==================  ============================================================================
 
 Masked pooling is a per-sample **masked mean** (``sum(f*m) / sum(m)``). The notebooks used
@@ -26,7 +29,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .backbone import build_swin_unetr, swin_stage_channels, swin_unetr_forward
+from .backbone import (SegMambaFeatures, build_swin_unetr, segmamba_stage_channels, swin_stage_channels,
+                       swin_unetr_forward)
 
 MASK_MODES = ("soft", "hard", "input", "none")
 FUSIONS = ("transformer", "cross_attention", "concat")
@@ -53,7 +57,9 @@ class MultiTaskGliomaNet(nn.Module):
                  encoder_stages: Sequence[int] = (4,), use_decoder_token: bool = True,
                  mask_mode: str = "soft", fusion: str = "transformer", d_model: int = 128,
                  n_heads: int = 4, num_layers: int = 2, dropout: float = 0.3,
-                 modality_dropout: float = 0.0, aux_heads: bool = True, freeze_backbone: bool = False):
+                 modality_dropout: float = 0.0, aux_heads: bool = True, freeze_backbone: bool = False,
+                 backbone: str = "swin_unetr", backbone_cfg: Mapping | None = None,
+                 peritumoral: bool = False, peritumoral_dilation: int = 5):
         super().__init__()
         if mask_mode not in MASK_MODES:
             raise ValueError(f"mask_mode must be one of {MASK_MODES}")
@@ -61,6 +67,8 @@ class MultiTaskGliomaNet(nn.Module):
             raise ValueError(f"fusion must be one of {FUSIONS}")
         if not tasks:
             raise ValueError("at least one task is required")
+        if peritumoral and mask_mode == "none":
+            raise ValueError("peritumoral tokens need a tumour mask (mask_mode != 'none')")
 
         self.tasks = dict(tasks)
         self.tabular_dims = {k: v for k, v in (tabular_dims or {}).items() if v > 0}
@@ -69,12 +77,27 @@ class MultiTaskGliomaNet(nn.Module):
         self.mask_mode, self.fusion = mask_mode, fusion
         self.modality_dropout = modality_dropout
         self.freeze_backbone = freeze_backbone
+        self.peritumoral, self.peritumoral_dilation = peritumoral, peritumoral_dilation
+        self.backbone_name = backbone
 
-        self.backbone = build_swin_unetr(in_channels, 1, feature_size, use_checkpoint)
+        if backbone == "swin_unetr":
+            self.backbone = build_swin_unetr(in_channels, 1, feature_size, use_checkpoint)
+            self.stage_channels, decoder_channels = swin_stage_channels(feature_size), feature_size
+            self._features = swin_unetr_forward
+        elif backbone == "segmamba":
+            from .segmentation import build_segmentation_model
+
+            bcfg = dict(backbone_cfg or {})
+            self.backbone = build_segmentation_model({"name": "segmamba", **bcfg}, in_channels, 1)
+            feat_size = list(bcfg.get("feat_size", [48, 96, 192, 384]))
+            self.stage_channels = segmamba_stage_channels(feat_size, bcfg.get("hidden_size", 768))
+            decoder_channels = feat_size[0]
+            self._features = SegMambaFeatures(self.backbone)
+        else:
+            raise ValueError(f"backbone must be 'swin_unetr' or 'segmamba', got {backbone!r}")
         if freeze_backbone:
             self.backbone.requires_grad_(False)
 
-        self.stage_channels = swin_stage_channels(feature_size)
         bad = [s for s in self.encoder_stages if not 0 <= s < len(self.stage_channels)]
         if bad:
             raise ValueError(f"encoder_stages {bad} out of range 0..4")
@@ -84,12 +107,14 @@ class MultiTaskGliomaNet(nn.Module):
 
         self.image_proj = nn.ModuleList([proj(self.stage_channels[s]) for s in self.encoder_stages])
         if use_decoder_token:
-            self.image_proj.append(proj(feature_size))
+            self.image_proj.append(proj(decoder_channels))
+        # Peritumoral tokens reuse the projection of their map (as in the thesis); the type embedding tells them apart.
+        self.n_image_tokens = len(self.image_proj) * (2 if peritumoral else 1)
         self.tab_proj = nn.ModuleDict({
             name: nn.Sequential(nn.Linear(dim, d_model), nn.LayerNorm(d_model), nn.GELU(), nn.Dropout(dropout))
             for name, dim in self.tabular_dims.items()})
 
-        n_ctx = len(self.image_proj) + len(self.tab_proj)
+        n_ctx = self.n_image_tokens + len(self.tab_proj)
         self.type_embed = nn.Parameter(torch.zeros(1, n_ctx, d_model))
         self.task_tokens = nn.Parameter(torch.randn(1, len(self.tasks), d_model) * 0.02)
         nn.init.trunc_normal_(self.type_embed, std=0.02)
@@ -111,7 +136,7 @@ class MultiTaskGliomaNet(nn.Module):
             t: nn.Sequential(nn.Linear(head_in, 64), nn.GELU(), nn.Dropout(dropout), nn.Linear(64, n))
             for t, n in self.tasks.items()})
         self.aux = nn.ModuleDict({
-            t: nn.ModuleList([nn.Linear(d_model, n) for _ in self.image_proj]) for t, n in self.tasks.items()
+            t: nn.ModuleList([nn.Linear(d_model, n) for _ in range(self.n_image_tokens)]) for t, n in self.tasks.items()
         }) if aux_heads else None
 
     # ------------------------------------------------------------------------------------ helpers
@@ -152,29 +177,38 @@ class MultiTaskGliomaNet(nn.Module):
 
     @property
     def token_names(self) -> list[str]:
-        """Names of the context tokens, in order (image stages, decoder, tabular inputs)."""
+        """Names of the context tokens, in order (image stages, decoder, peritumoral copies, tabular inputs)."""
         names = [f"image_stage{s}" for s in self.encoder_stages]
         if self.use_decoder_token:
             names.append("image_decoder")
+        if self.peritumoral:
+            names += [f"{n}_peritumoral" for n in names]
         return names + list(self.tab_proj)
+
+    def peritumoral_ring(self, mask: torch.Tensor) -> torch.Tensor:
+        """Shell around the tumour: mask dilated by ``peritumoral_dilation`` voxels minus the mask itself."""
+        k = 2 * self.peritumoral_dilation + 1
+        return (F.max_pool3d(mask, kernel_size=k, stride=1, padding=self.peritumoral_dilation) - mask).clamp_min(0)
 
     # ------------------------------------------------------------------------------------ forward
     def encode(self, image: torch.Tensor, tabular: Mapping[str, torch.Tensor] | None = None,
                mask: torch.Tensor | None = None) -> dict:
         """Backbone + tokenisation: ``feats`` (SwinOutputs), ``image_tokens`` and ``tab_tokens`` ([B, d] each)."""
         with torch.set_grad_enabled(torch.is_grad_enabled() and not self.freeze_backbone):
-            feats = swin_unetr_forward(self.backbone, image)
+            feats = self._features(self.backbone, image)
         attn_mask = self._mask(feats.logits, mask)
 
         maps = [feats.hidden[s] for s in self.encoder_stages]
         if self.use_decoder_token:
             maps.append(feats.decoder)
-        image_tokens = []
         for fmap, proj in zip(maps, self.image_proj):
             expected = proj[0].in_features
             if fmap.shape[1] != expected:  # fail loudly, never substitute zeros
                 raise RuntimeError(f"feature map has {fmap.shape[1]} channels, projection expects {expected}")
-            image_tokens.append(proj(masked_mean(fmap, attn_mask)))
+        image_tokens = [proj(masked_mean(fmap, attn_mask)) for fmap, proj in zip(maps, self.image_proj)]
+        if self.peritumoral:
+            ring = self.peritumoral_ring(attn_mask)
+            image_tokens += [proj(masked_mean(fmap, ring)) for fmap, proj in zip(maps, self.image_proj)]
         return {"feats": feats, "image_tokens": image_tokens, "tab_tokens": self._tabular_tokens(tabular)}
 
     def context(self, image_tokens: list, tab_tokens: list, drop: Sequence[int] = ()) -> torch.Tensor:
