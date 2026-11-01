@@ -37,7 +37,9 @@ segmentation:
 classification:
   backbone: seg_swin_unetr_ssl          # segmentation run (first seed) used as backbone + mask predictor
   feature_config: configs/cls_mask_guided.yaml   # data/model settings for deep-feature + radiomics extraction
-  seeds: [42, 43, 44]
+  # One seed first. Later change to [42, 43, 44]: finished runs are skipped, only the new seeds train,
+  # and the tables switch to mean ± SD over seeds.
+  seeds: [42]
   overrides: [train.epochs=100]
   # Every experiment also reports LGG vs HGG (from its grade head, or a dedicated head for cls_segmamba).
   # Per experiment: `use_radiomics`, `backbone` (a segmentation model key) and `seeds` override the defaults.

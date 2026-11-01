@@ -85,11 +85,12 @@ Estimated from your thesis Colab logs (T4, 15 GB). An A100 or L4 is roughly 2–
 | 3D U-Net (wider + thesis configuration) | ~4–6 h | 2 | ~10 h |
 | SegMamba (+ one-time CUDA build, ~10–20 min) | ~8 h | 1 | ~8 h |
 | Predicted masks + features | ~0.5 h | 1 | ~0.5 h |
-| Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 8 experiments × 3 seeds = 24 | ~50–100 h |
+| Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 8 experiments × 1 seed (default) / × 3 seeds | ~16–36 h / ~50–100 h |
 | Explanations (Grad-CAM per test patient) | ~10–20 min | 8 | ~2 h |
 | k-fold CV (CPU, with MLP) | ~0.5–1 h | 1 | ~1 h |
 
-Roughly 130–200 T4-hours in total, about half of it the classifiers. With this many runs an L4 or A100
+With the default single seed, roughly 85–130 T4-hours in total (about 45–65 on an L4, 25–40 on an
+A100). Going to 3 classifier seeds adds about 35–65 T4-hours, for roughly 130–200 in total. With this many runs an L4 or A100
 is worth it (roughly 65–100 or 30–60 h). Ways to trim, in order of least harm (the segmentation
 benchmark and the classifier variants all stay in):
 
