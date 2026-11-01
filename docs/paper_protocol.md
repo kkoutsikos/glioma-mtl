@@ -81,7 +81,10 @@ segmentation benchmark keeps all thesis models):
 3. classifier epochs to 60.
 
 **On Colab.** A T4 (15 GB) is enough: the thesis ran the same model sizes on one, and here fp16
-mixed precision and gradient checkpointing are on.
+mixed precision and gradient checkpointing are on. An L4 is roughly 2× and an A100 3–5× faster with
+identical hyperparameters, so results don't depend on the GPU. You can switch GPU type between sessions;
+runs resume across GPU types and the cached SegMamba wheels cover all three. The notebook scales data
+loaders to the VM's CPUs.
 - Free-tier sessions end after at most ~12 h (often sooner) and GPU time is rationed, so the run spans
   many sessions. Each one is: setup cells → stage cell.
 - Each finished run keeps only `best.pt` (`keep_last_checkpoints: false`). Drive needs about 4 GB in total,
