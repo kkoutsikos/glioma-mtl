@@ -37,6 +37,11 @@ These further changes are improvements rather than error fixes. State them in th
 
 ## 2. Experiment matrix
 
+**Definition of "clinical" used throughout:** everything known before surgery: age, sex, and whether a
+biopsy preceded the MRI (`clinical.groups: [demographics, history]`). IDH, 1p/19q, MGMT and extent of
+resection come from tissue or surgery and define the WHO-2021 labels. They appear only in the leaky
+reference rows.
+
 | Step | Runs | Answers | Table |
 |---|---|---|---|
 | `splits` | 1 | fixed patient-level split (162 cohort: 112/25/25; 495 segmentation: 345/75/75) | data |
@@ -44,9 +49,9 @@ These further changes are improvements rather than error fixes. State them in th
 | `seg` | the 5 thesis architectures (SwinUNETR scratch / +SSL, SegResNet, 3D U-Net, SegMamba) + the 3D U-Net in its thesis configuration, × seeds | which architecture segments whole tumour best on T2; does SSL help (`seg_swin_unetr` vs `seg_swin_unetr_ssl`); was the thesis U-Net result a configuration problem (`seg_unet` vs `seg_unet_thesis`) | `segmentation` |
 | `predict` | backbone on classification train/val/test | predicted masks for crop localisation, deep features, radiomics | – |
 | `features` | 1 + 1 | label-free deep features, radiomics from predicted masks | – |
-| `cls` | 8 experiments × 3 seeds: image only, image + age/sex, leaky reference, and the corrected thesis variants (cascade, multi-scale, radiomics token, Trinity, SegMamba backbone) | what imaging adds for grade / diagnosis / LGG vs HGG; which fusion design helps; what molecular data explain (reference) | `classification` |
+| `cls` | 8 experiments × seeds. **Main ladder** (same model, only inputs change): image only → image + clinical → image + clinical + radiomics. A leaky reference (image + thesis clinical vector) and the corrected thesis architectures (cascade, multi-scale, Trinity, SegMamba backbone) complete the set. | what each input adds for grade / diagnosis / LGG vs HGG; which fusion design helps; what post-operative molecular data explain (reference) | `classification` |
 | `explain` | first seed of each classifier | which modality / image scale drives each prediction: fusion attention, token occlusion, 3D Grad-CAM per test patient | figures |
-| `kfold` | repeated 5-fold × 10 + hold-out | XGBoost / logistic regression / RF late fusion of demographics, radiomics and deep features; tabular baselines; XGBoost TreeSHAP per modality | `kfold_cv`, `kfold_holdout` |
+| `kfold` | repeated 5-fold × 10 + hold-out | the same ladder as late fusion (image → image + clinical → image + clinical + radiomics, with XGBoost / logistic regression / RF / MLP; "image" = label-free deep features), no-imaging baselines (age + sex, clinical, radiomics), leaky references; XGBoost TreeSHAP per modality | `kfold_cv`, `kfold_holdout` |
 | `aggregate` | – | writes all tables (CSV, Markdown, LaTeX) | – |
 | `figures` | – | training curves, segmentation boxplots + qualitative overlays, confusion matrices, ROC curves, k-fold bars, SHAP | figures |
 

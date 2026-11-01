@@ -1,12 +1,15 @@
 inherit: base.yaml
 name: cls_mask_guided
 
-tasks: [grade, diagnosis]          # any of: grade, diagnosis, idh
+# The paper's "image + clinical" model, and the base every other classifier config inherits from.
+# Ladder: cls_image_only (clinical.groups: []) -> this -> cls_image_clinical_radiomics (+ radiomics token).
+tasks: [grade, diagnosis]          # any of: grade, diagnosis, idh, lgg_hgg
 
-# Leakage-safe default: only information available at the pre-operative MRI.
-# Groups: demographics (Age, Sex) | history (biopsy before imaging) | molecular (IDH, 1p/19q, MGMT) | surgical (EOR)
+# "Clinical" = everything known before surgery: age, sex, and whether a biopsy preceded the MRI.
+# Groups: demographics (Age, Sex) | history (biopsy before imaging) | molecular (IDH, 1p/19q, MGMT) | surgical (EOR).
+# molecular / surgical come from tissue or surgery and define the WHO-2021 labels: leaky reference only.
 clinical:
-  groups: [demographics]
+  groups: [demographics, history]
   allow_leakage: false
 
 radiomics:

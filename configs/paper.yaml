@@ -43,15 +43,17 @@ classification:
   overrides: [train.epochs=100]
   # Every experiment also reports LGG vs HGG (from its grade head, or a dedicated head for cls_segmamba).
   # Per experiment: `use_radiomics`, `backbone` (a segmentation model key) and `seeds` override the defaults.
+  # The experiment key is the run / table name, so the main ladder reads as the paper's comparison.
   experiments:
-    # main comparison
+    # main comparison: the same model, only the inputs change ("clinical" = age, sex, biopsy before MRI)
     cls_image_only: {config: configs/cls_image_only.yaml}
-    cls_mask_guided: {config: configs/cls_mask_guided.yaml}              # imaging + age/sex
+    cls_image_clinical: {config: configs/cls_mask_guided.yaml}
+    cls_image_clinical_radiomics: {config: configs/cls_image_clinical_radiomics.yaml, use_radiomics: true}
+    # reference only: image + the thesis clinical vector (IDH, 1p/19q, MGMT, EOR = post-operative, leaky)
     cls_leaky_reference: {config: configs/cls_leaky_reference.yaml, reference: true}
-    # thesis variants, corrected
-    cls_cascade: {config: configs/cls_cascade.yaml}                      # frozen encoder + clinical, concat
+    # corrected thesis architecture variants (image + clinical, + radiomics where the thesis had it)
+    cls_cascade: {config: configs/cls_cascade.yaml}                      # frozen encoder, concat fusion
     cls_multiscale: {config: configs/cls_multiscale.yaml}                # stages 2-4 + decoder
-    cls_radiomics_token: {config: configs/cls_radiomics_token.yaml, use_radiomics: true}
     cls_trinity: {config: configs/cls_trinity.yaml, use_radiomics: true} # cross-attention, stages 1-3, SupCon
     cls_segmamba: {config: configs/cls_segmamba.yaml, use_radiomics: true, backbone: seg_segmamba, optional: true}
 

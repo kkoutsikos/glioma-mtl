@@ -146,8 +146,12 @@ python scripts/train_classifier.py --config configs/cls_mask_guided.yaml --set d
 python scripts/evaluate_classifier.py --config runs/cls_mask_guided/config.yaml --checkpoint runs/cls_mask_guided/best.pt
 ```
 
-Other configs: `cls_image_only.yaml` (no tabular input), `cls_idh_radiogenomics.yaml` (IDH from imaging),
-and `cls_thesis_reproduction.yaml` (the thesis setting, leakage included, for comparison only).
+The paper's main comparison is a ladder of the same model with growing inputs: `cls_image_only.yaml` →
+`cls_mask_guided.yaml` (image + clinical: age, sex, biopsy before MRI) → `cls_image_clinical_radiomics.yaml`.
+`cls_leaky_reference.yaml` adds the post-operative molecular variables, for reference only. The thesis
+architectures are `cls_cascade`, `cls_multiscale`, `cls_trinity` and `cls_segmamba`.
+`cls_idh_radiogenomics.yaml` predicts IDH from imaging, and `cls_thesis_reproduction.yaml` reproduces the
+thesis setting, leakage included, for comparison only.
 
 **Radiomics** (optional token / tabular baseline):
 

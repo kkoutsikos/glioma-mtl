@@ -1,6 +1,7 @@
 inherit: cls_mask_guided.yaml
 name: cls_image_only
 
-# Pure imaging model: answers "what does the MRI contribute?"
+# First rung of the paper's ladder: image only. Identical to cls_mask_guided (image + clinical) except
+# that it has no clinical input. Answers "what does the MRI contribute on its own?"
 clinical:
   groups: []

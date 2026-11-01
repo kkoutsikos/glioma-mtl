@@ -1,0 +1,10 @@
+inherit: cls_mask_guided.yaml
+name: cls_image_clinical_radiomics
+
+# Third rung of the paper's ladder: image + clinical + radiomics. Identical to cls_mask_guided
+# (image + clinical) except for the extra radiomics token, so any difference is due to the radiomics.
+# This is also the corrected thesis "V2 with radiomics" model. The runner sets radiomics.csv (features
+# from the predicted masks); scaling and SelectKBest are fit on the training split only.
+radiomics:
+  k: 30
+  select_task: grade

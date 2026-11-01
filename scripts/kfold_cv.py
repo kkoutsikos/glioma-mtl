@@ -40,16 +40,26 @@ from glioma_mtl.features import load_deep_features
 from glioma_mtl.radiomics import TopK, load_radiomics
 
 # name -> (clinical groups, radiomics?, deep?)
-FEATURE_SETS = {
-    "demographics": (["demographics"], False, False),
-    "radiomics": ([], True, False),
-    "demographics+radiomics": (["demographics"], True, False),
-    "deep": ([], False, True),
-    "deep+demographics": (["demographics"], False, True),
-    "deep+demographics+radiomics": (["demographics"], True, True),
-    "molecular+surgical (leaky reference)": (["molecular", "surgical"], False, False),
-    "thesis clinical vector (leaky reference)": (["demographics", "history", "molecular", "surgical"], False, False),
-}
+def feature_sets(clinical: list[str]) -> dict[str, tuple[list[str], bool, bool]]:
+    """name -> (clinical groups, radiomics?, deep?).
+
+    Mirrors the deep classifiers' ladder: image -> image+clinical -> image+clinical+radiomics, where
+    "image" = label-free deep features from the segmentation backbone and "clinical" uses the same groups as
+    the deep models (config ``clinical.groups``). Plus the no-imaging baselines and the leaky references.
+    """
+    sets = {"age+sex": (["demographics"], False, False)}
+    if sorted(clinical) != ["demographics"]:
+        sets["clinical"] = (list(clinical), False, False)
+    sets.update({
+        "radiomics": ([], True, False),
+        "clinical+radiomics": (list(clinical), True, False),
+        "image": ([], False, True),
+        "image+clinical": (list(clinical), False, True),
+        "image+clinical+radiomics": (list(clinical), True, True),
+        "molecular+surgical (leaky reference)": (["molecular", "surgical"], False, False),
+        "thesis clinical vector (leaky reference)": (["demographics", "history", "molecular", "surgical"], False, False),
+    })
+    return sets
 SCORING = {"accuracy": "accuracy", "balanced_accuracy": "balanced_accuracy", "macro_f1": "f1_macro",
            "macro_auc": "roc_auc_ovr"}
 
@@ -142,6 +152,7 @@ def main() -> None:
 
     models = make_models(cv_cfg)
     wanted_sets = cv_cfg.get("feature_sets")
+    sets = feature_sets((cfg.get("clinical") or {}).get("groups") or ["demographics"])
     cv = RepeatedStratifiedKFold(n_splits=cv_cfg.get("folds", 5), n_repeats=cv_cfg.get("repeats", 10),
                                  random_state=cfg.get("seed", 42))
     out_dir = Path(args.out_dir or Path(cfg.get("output_root", "runs")) / "kfold_cv")
@@ -152,7 +163,7 @@ def main() -> None:
         label_col, classes = TASKS[task]
         sub = df[df[label_col] >= 0]
         y = sub[label_col].to_numpy()
-        for fs_name, (groups, use_rad, use_deep) in FEATURE_SETS.items():
+        for fs_name, (groups, use_rad, use_deep) in sets.items():
             if wanted_sets is not None and fs_name not in wanted_sets:
                 continue
             if (use_rad and not blocks["rad"]) or (use_deep and not blocks["deep"]):
@@ -161,7 +172,7 @@ def main() -> None:
             rad, deep = (blocks["rad"] if use_rad else []), (blocks["deep"] if use_deep else [])
             X = sub[numeric + categorical + rad + deep]
             for model_name, make_model in models.items():
-                if model_name == "majority" and fs_name != "demographics":
+                if model_name == "majority" and fs_name != "age+sex":
                     continue
                 label = "-" if model_name == "majority" else fs_name
                 fit_params = ({"clf__sample_weight": compute_sample_weight("balanced", y)}

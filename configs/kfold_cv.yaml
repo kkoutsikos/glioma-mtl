@@ -3,6 +3,12 @@ name: kfold_cv
 
 tasks: [grade, diagnosis, idh, lgg_hgg]
 
+# Same "clinical" as the deep classifiers (configs/cls_mask_guided.yaml): everything known before surgery.
+# Feature sets mirror the ladder: image -> image+clinical -> image+clinical+radiomics ("image" = label-free
+# deep features from the segmentation backbone), plus age+sex / clinical / radiomics baselines and leaky references.
+clinical:
+  groups: [demographics, history]
+
 radiomics:
   csv: null          # runs/radiomics/radiomics_pred.csv (predicted masks) or radiomics_label.csv (oracle)
   k: 30              # SelectKBest per training fold
