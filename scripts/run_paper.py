@@ -147,7 +147,8 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--plan", default="configs/paper.yaml")
-    parser.add_argument("--set", nargs="*", default=[], help="extra overrides applied to every step")
+    parser.add_argument("--set", nargs="*", default=[], action="extend",
+                        help="extra overrides applied to every step; may be repeated, later values win")
     parser.add_argument("--stages", nargs="*", default=STAGES, choices=STAGES)
     parser.add_argument("--only", nargs="*", default=None, help="run only these step ids")
     parser.add_argument("--redo", nargs="*", default=[], help="step ids to run again even if marked done")
