@@ -57,9 +57,14 @@ def feature_sets(clinical: list[str]) -> dict[str, tuple[list[str], bool, bool]]
         "image+clinical": (list(clinical), False, True),
         "image+clinical+radiomics": (list(clinical), True, True),
         "molecular+surgical (leaky reference)": (["molecular", "surgical"], False, False),
-        "thesis clinical vector (leaky reference)": (["demographics", "history", "molecular", "surgical"], False, False),
+        "thesis clinical vector (leaky reference)": (THESIS_CLINICAL, False, False),
+        "image+thesis clinical (leaky reference)": (THESIS_CLINICAL, False, True),
+        "image+thesis clinical+radiomics (leaky reference)": (THESIS_CLINICAL, True, True),
     })
     return sets
+
+
+THESIS_CLINICAL = ["demographics", "history", "molecular", "surgical"]
 SCORING = {"accuracy": "accuracy", "balanced_accuracy": "balanced_accuracy", "macro_f1": "f1_macro",
            "macro_auc": "roc_auc_ovr"}
 

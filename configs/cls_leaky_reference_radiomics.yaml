@@ -1,0 +1,10 @@
+inherit: cls_leaky_reference.yaml
+name: cls_leaky_reference_radiomics
+
+# Reference only: image + the thesis clinical vector (incl. IDH, 1p/19q, MGMT, EOR) + radiomics, with the
+# corrected pipeline. Together with cls_leaky_reference it mirrors the main ladder's last two rungs, so the
+# thesis-style results can be shown side by side with the leakage-free ones. Never report it as an imaging
+# model. The runner sets radiomics.csv; scaling and SelectKBest are fit on the training split only.
+radiomics:
+  k: 30
+  select_task: grade

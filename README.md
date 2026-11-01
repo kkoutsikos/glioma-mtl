@@ -148,7 +148,8 @@ python scripts/evaluate_classifier.py --config runs/cls_mask_guided/config.yaml 
 
 The paper's main comparison is a ladder of the same model with growing inputs: `cls_image_only.yaml` →
 `cls_mask_guided.yaml` (image + clinical: age, sex, biopsy before MRI) → `cls_image_clinical_radiomics.yaml`.
-`cls_leaky_reference.yaml` adds the post-operative molecular variables, for reference only. The thesis
+`cls_leaky_reference.yaml` and `cls_leaky_reference_radiomics.yaml` repeat the last two rungs with the
+thesis clinical vector, which includes post-operative molecular variables; they are references only. The thesis
 architectures are `cls_cascade`, `cls_multiscale`, `cls_trinity` and `cls_segmamba`.
 `cls_idh_radiogenomics.yaml` predicts IDH from imaging, and `cls_thesis_reproduction.yaml` reproduces the
 thesis setting, leakage included, for comparison only.

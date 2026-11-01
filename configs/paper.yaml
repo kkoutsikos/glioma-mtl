@@ -49,8 +49,9 @@ classification:
     cls_image_only: {config: configs/cls_image_only.yaml}
     cls_image_clinical: {config: configs/cls_mask_guided.yaml}
     cls_image_clinical_radiomics: {config: configs/cls_image_clinical_radiomics.yaml, use_radiomics: true}
-    # reference only: image + the thesis clinical vector (IDH, 1p/19q, MGMT, EOR = post-operative, leaky)
+    # reference only: the thesis clinical vector (IDH, 1p/19q, MGMT, EOR = post-operative, leaky), same two rungs
     cls_leaky_reference: {config: configs/cls_leaky_reference.yaml, reference: true}
+    cls_leaky_reference_radiomics: {config: configs/cls_leaky_reference_radiomics.yaml, use_radiomics: true, reference: true}
     # corrected thesis architecture variants (image + clinical, + radiomics where the thesis had it)
     cls_cascade: {config: configs/cls_cascade.yaml}                      # frozen encoder, concat fusion
     cls_multiscale: {config: configs/cls_multiscale.yaml}                # stages 2-4 + decoder

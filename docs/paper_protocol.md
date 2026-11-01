@@ -49,7 +49,7 @@ reference rows.
 | `seg` | the 5 thesis architectures (SwinUNETR scratch / +SSL, SegResNet, 3D U-Net, SegMamba) + the 3D U-Net in its thesis configuration, × seeds | which architecture segments whole tumour best on T2; does SSL help (`seg_swin_unetr` vs `seg_swin_unetr_ssl`); was the thesis U-Net result a configuration problem (`seg_unet` vs `seg_unet_thesis`) | `segmentation` |
 | `predict` | backbone on classification train/val/test | predicted masks for crop localisation, deep features, radiomics | – |
 | `features` | 1 + 1 | label-free deep features, radiomics from predicted masks | – |
-| `cls` | 8 experiments × seeds. **Main ladder** (same model, only inputs change): image only → image + clinical → image + clinical + radiomics. A leaky reference (image + thesis clinical vector) and the corrected thesis architectures (cascade, multi-scale, Trinity, SegMamba backbone) complete the set. | what each input adds for grade / diagnosis / LGG vs HGG; which fusion design helps; what post-operative molecular data explain (reference) | `classification` |
+| `cls` | 9 experiments × seeds. **Main ladder** (same model, only inputs change): image only → image + clinical → image + clinical + radiomics. A **leaky reference ladder** with the thesis clinical vector (image + thesis clinical → + radiomics) sits side by side with the last two rungs. The corrected thesis architectures (cascade, multi-scale, Trinity, SegMamba backbone) complete the set. | what each input adds for grade / diagnosis / LGG vs HGG; which fusion design helps; what post-operative molecular data explain (reference) | `classification` |
 | `explain` | first seed of each classifier | which modality / image scale drives each prediction: fusion attention, token occlusion, 3D Grad-CAM per test patient | figures |
 | `kfold` | repeated 5-fold × 10 + hold-out | the same ladder as late fusion (image → image + clinical → image + clinical + radiomics, with XGBoost / logistic regression / RF / MLP; "image" = label-free deep features), no-imaging baselines (age + sex, clinical, radiomics), leaky references; XGBoost TreeSHAP per modality | `kfold_cv`, `kfold_holdout` |
 | `aggregate` | – | writes all tables (CSV, Markdown, LaTeX) | – |
@@ -90,7 +90,7 @@ Estimated from your thesis Colab logs (T4, 15 GB). An A100 or L4 is roughly 2–
 | 3D U-Net (wider + thesis configuration) | ~4–6 h | 2 | ~10 h |
 | SegMamba (+ one-time CUDA build, ~10–20 min) | ~8 h | 1 | ~8 h |
 | Predicted masks + features | ~0.5 h | 1 | ~0.5 h |
-| Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 8 experiments × 1 seed (default) / × 3 seeds | ~16–36 h / ~50–100 h |
+| Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 9 experiments × 1 seed (default) / × 3 seeds | ~18–40 h / ~55–120 h |
 | Explanations (Grad-CAM per test patient) | ~10–20 min | 8 | ~2 h |
 | k-fold CV (CPU, with MLP) | ~0.5–1 h | 1 | ~1 h |
 
