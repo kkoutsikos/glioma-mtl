@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from glioma_mtl.config import apply_overrides
-from glioma_mtl.data.transforms import CropAroundMaskd
+from glioma_mtl.data.transforms import CropAroundMaskd, ssl_transforms
 from glioma_mtl.evaluation import bootstrap_ci, classification_metrics
 from glioma_mtl.utils import load_weights, save_checkpoint
 
@@ -21,6 +21,23 @@ def test_crop_around_empty_mask_uses_centre():
     data = {"image": np.arange(1000.0).reshape(1, 10, 10, 10), "mask": np.zeros((1, 10, 10, 10))}
     out = CropAroundMaskd(["image", "mask"], "mask", (4, 4, 4))(data)
     assert out["image"].shape[1:] == (4, 4, 4)
+
+
+def test_ssl_rotation_view_keeps_orientation(tmp_path):
+    """Two in-plane flips equal a 180° rotation, so the rotation view must never be flipped (thesis bug)."""
+    nib = pytest.importorskip("nibabel")
+    g = np.meshgrid(*[np.linspace(0, 1, 40)] * 3, indexing="ij")
+    volume = (1 + g[0] + 2 * g[1] + 3 * g[2]).astype(np.float32)   # asymmetric along every axis
+    nib.save(nib.Nifti1Image(volume, np.eye(4)), tmp_path / "x.nii.gz")
+    tf = ssl_transforms({"spacing": [1.0, 1.0, 1.0], "roi_size": [32, 32, 32], "intensity": {"kind": "zscore"}})
+    flipped_con = 0
+    for seed in range(20):
+        tf.set_random_state(seed)
+        out = tf({"image": str(tmp_path / "x.nii.gz")})
+        base = np.asarray(out["image"]).ravel()
+        assert np.corrcoef(base, np.asarray(out["view_rot"]).ravel())[0, 1] > 0.95
+        flipped_con += np.corrcoef(base, np.asarray(out["view_con1"]).ravel())[0, 1] < 0
+    assert flipped_con > 0   # the contrastive views are still flipped
 
 
 def test_load_weights_fails_loudly_on_mismatch(tmp_path):

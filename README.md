@@ -190,6 +190,7 @@ These are built into the code because the thesis notebooks ran into each of them
 | Half of the classification crops were background; eval used a fixed centre crop | tumour-centred crops (`pos=1, neg=0`) and `CropAroundMaskd` (GT = oracle, or predicted masks) |
 | Fixed [0, 3000] intensity window on raw MRI | per-volume z-score (`intensity.kind: zscore`; `range` reproduces the thesis) |
 | Voxel-wise SSL masking; validation in train mode | cube masking (`mask_patch_size`), eval-mode validation with a fixed seed |
+| Rotation pretext at chance: the rotation view was flipped (= 180° rotation) and globally pooled | no flips on the rotation view, rotation head on a 2×2×2 grid of the bottleneck |
 | Single numbers on 25 test patients | bootstrap 95% CIs, per-case CSVs, paired Wilcoxon, repeated CV for tabular models |
 | XGBoost trained on embeddings from a network fit to the same patients' labels | k-fold CV on label-free segmentation-backbone features, selection inside each fold |
 

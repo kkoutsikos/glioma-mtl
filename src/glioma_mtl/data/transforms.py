@@ -106,7 +106,9 @@ def ssl_transforms(cfg: Mapping) -> Compose:
         SpatialPadd(keys=IMAGE, spatial_size=roi),
         RandSpatialCropd(keys=IMAGE, roi_size=roi, random_size=False),
         CopyItemsd(keys=IMAGE, times=3, names=list(SSL_VIEWS)),
-        RandFlipd(keys=list(SSL_VIEWS), prob=0.5, spatial_axis=[0, 1, 2]),
+        # Flips only on the contrastive views. Flipping both in-plane axes of the rotation view equals a 180°
+        # rotation, so the rotation label would be ambiguous (k vs k+2): the thesis' rotation task sat at chance.
+        RandFlipd(keys=["view_con1", "view_con2"], prob=0.5, spatial_axis=[0, 1, 2]),
         RandGaussianNoised(keys=list(SSL_VIEWS), prob=0.3, mean=0.0, std=0.02),
         RandAdjustContrastd(keys=list(SSL_VIEWS), prob=0.3, gamma=(0.7, 1.3)),
         # Only the contrastive views get small random rotations; the rotation-prediction view must not.

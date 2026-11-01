@@ -32,6 +32,9 @@ These further changes are improvements rather than error fixes. State them in th
 - tumour-centred classification crops (predicted mask at test time) instead of 50% background / centre
   crops;
 - cube masking for SSL instead of voxel masking;
+- a learnable rotation pretext task: the rotation view is no longer randomly flipped (two in-plane flips
+  equal a 180° rotation, which made the label ambiguous), and the rotation head reads a 2×2×2 grid of the
+  bottleneck instead of a single globally pooled vector;
 - a stronger UNet configuration;
 - checkpoint selection on an EMA-smoothed validation loss.
 

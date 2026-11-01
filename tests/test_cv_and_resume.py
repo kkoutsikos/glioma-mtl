@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import VarianceThreshold
@@ -55,6 +56,12 @@ def test_resume_restores_training_state(tmp_path):
     assert torch.equal(model.weight, model2.weight)
     assert sched2.last_epoch == sched.last_epoch and tracker2.best_epoch == 2
     assert try_resume(tmp_path / "missing.pt", *setup()) == 0
+
+    other = torch.nn.Linear(3, 2)                     # e.g. a run started before a head changed shape
+    other_opt = make_optimizer(other.parameters(), {"lr": 0.1})
+    with pytest.raises(RuntimeError, match="Delete its run folder"):
+        try_resume(tmp_path / "last.pt", other, other_opt, make_scheduler(other_opt, {"warmup_epochs": 0}, epochs=10),
+                   AmpStepper(other_opt, other.parameters(), torch.device("cpu")), BestTracker("max"))
 
 
 def test_deep_features_use_mask_and_one_row_per_patient():

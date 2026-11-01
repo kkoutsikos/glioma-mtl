@@ -107,7 +107,11 @@ def try_resume(path: str | Path, model, optimizer, scheduler, stepper: AmpSteppe
     if "optimizer" not in state:
         LOG.warning("%s has no optimizer state; starting from scratch", path)
         return 0
-    model.load_state_dict(state["model_state"])
+    try:
+        model.load_state_dict(state["model_state"])
+    except RuntimeError as err:
+        raise RuntimeError(f"{path} was written by a different model version and cannot be resumed. Delete "
+                           f"its run folder {path.parent} to start this run from scratch.\n{err}") from err
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
     stepper.scaler.load_state_dict(state["scaler"])

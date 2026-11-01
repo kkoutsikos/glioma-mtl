@@ -9,7 +9,9 @@ Branches (each can be switched off with its loss weight):
 
 Changes vs. the thesis: ``mask_patch_size`` masks **cubes** instead of independent voxels (voxel
 masking is solved by interpolation and teaches little), and validation is run in ``eval`` mode with
-a fixed random seed (the notebook validated in train mode with fresh random masks each epoch).
+a fixed random seed (the notebook validated in train mode with fresh random masks each epoch). The
+rotation task is made learnable: its view is never flipped (two in-plane flips = a 180° rotation, so the
+label was ambiguous) and its head keeps a coarse spatial layout of the bottleneck.
 """
 from __future__ import annotations
 
@@ -31,7 +33,11 @@ class HybridSSLPretrainer(nn.Module):
         deep = swin_stage_channels(feature_size)[-1]  # 16 * feature_size
         self.projector = nn.Sequential(nn.Linear(deep, deep // 4), nn.ReLU(inplace=True),
                                        nn.Linear(deep // 4, projection_dim))
-        self.rot_head = nn.Linear(deep, 4)
+        # The rotation head sees a 2x2x2 grid of the bottleneck, not one averaged vector: global average pooling
+        # is nearly invariant to an in-plane rotation of the input, so the thesis' head could not tell k apart.
+        self.rot_grid = 2
+        self.rot_head = nn.Sequential(nn.Linear(deep * self.rot_grid ** 3, deep // 2), nn.ReLU(inplace=True),
+                                      nn.Linear(deep // 2, 4))
 
         # /32 -> full resolution in five x2 upsampling steps
         chans = [deep, 8 * feature_size, 4 * feature_size, 2 * feature_size, feature_size, feature_size]
@@ -74,8 +80,8 @@ class HybridSSLPretrainer(nn.Module):
             out["z1"] = F.normalize(self.projector(pooled1), dim=1)
             out["z2"] = F.normalize(self.projector(pooled2), dim=1)
         if x_rot is not None:
-            _, pooled_rot = self._pooled(x_rot)
-            out["rot_logits"] = self.rot_head(pooled_rot)
+            deep_rot, _ = self._pooled(x_rot)
+            out["rot_logits"] = self.rot_head(F.adaptive_avg_pool3d(deep_rot, self.rot_grid).flatten(1))
         return out
 
     def encoder_state_dict(self) -> dict:

@@ -12,7 +12,7 @@ loss:
   temperature: 0.5
   weights:              # 0 switches a branch off entirely
     mae: 1.0
-    rotation: 0.5       # the thesis' final run used 0, so its rotation head never trained
+    rotation: 0.5       # the thesis' final run used 0; its rotation view was also flipped, so the label was ambiguous
     contrastive: 1.0    # NB: with batch_size 2 there are only 2 negatives; accumulation does not add more
     light: 0.1
 
