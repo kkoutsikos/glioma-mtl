@@ -11,6 +11,9 @@ data/predictions/
 data/metadata/*.csv
 !data/metadata/.gitkeep
 
+# Third-party code cloned at run time (SegMamba)
+third_party/
+
 # Training outputs
 runs/
 outputs/

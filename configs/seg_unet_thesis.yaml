@@ -1,0 +1,12 @@
+inherit: seg_unet.yaml
+name: seg_unet_thesis
+
+# The 3D U-Net exactly as configured in the thesis (dipl7 notebook: UNET_CHANNELS, UNET_STRIDES, UNET_DROPOUT).
+# It reached 0.64 Dice there. Running it next to seg_unet (wider, no dropout) under the same budget
+# shows whether that was the architecture or its configuration.
+model:
+  channels: [16, 32, 64, 128, 256]
+  strides: [2, 2, 2, 2]
+  num_res_units: 2
+  norm: instance
+  dropout: 0.1

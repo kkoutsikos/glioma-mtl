@@ -1,7 +1,9 @@
 inherit: seg_swin_unetr.yaml
 name: seg_segmamba
 
-# Needs a CUDA build of https://github.com/ge-xing/SegMamba (see models/segmentation.py).
+# Needs a CUDA build of https://github.com/ge-xing/SegMamba: on Colab, run the notebook's SegMamba cell
+# (clones into third_party/SegMamba, pins transformers==4.39.3, builds and caches the CUDA wheels).
+# The thesis trained SegMamba with lr 5e-5; here every model gets the same budget (lr 1e-4, 100 epochs).
 model:
   name: segmamba
   segmamba_repo: third_party/SegMamba

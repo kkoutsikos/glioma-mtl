@@ -41,7 +41,7 @@ These further changes are improvements rather than error fixes. State them in th
 |---|---|---|---|
 | `splits` | 1 | fixed patient-level split (162 cohort: 112/25/25; 495 segmentation: 345/75/75) | data |
 | `ssl` | 1 | pretrains the SwinUNETR encoder on SSL train/val only | – |
-| `seg` | 5 models × seeds | which architecture segments whole tumour best on T2; does SSL help (`seg_swin_unetr` vs `seg_swin_unetr_ssl`) | `segmentation` |
+| `seg` | the 5 thesis architectures (SwinUNETR scratch / +SSL, SegResNet, 3D U-Net, SegMamba) + the 3D U-Net in its thesis configuration, × seeds | which architecture segments whole tumour best on T2; does SSL help (`seg_swin_unetr` vs `seg_swin_unetr_ssl`); was the thesis U-Net result a configuration problem (`seg_unet` vs `seg_unet_thesis`) | `segmentation` |
 | `predict` | backbone on classification train/val/test | predicted masks for crop localisation, deep features, radiomics | – |
 | `features` | 1 + 1 | label-free deep features, radiomics from predicted masks | – |
 | `cls` | 3 experiments × 3 seeds | what imaging adds for grade / diagnosis; what molecular data explain (reference) | `classification` |
@@ -67,18 +67,18 @@ Estimated from your thesis Colab logs (T4, 15 GB). An A100 or L4 is roughly 2–
 | SSL, 50 epochs (about 13 min/epoch) | ~11 h | 1 | ~11 h |
 | SwinUNETR (scratch or SSL), 100 epochs, val every 5 | ~11 h | 2 | ~22 h |
 | SegResNet | ~4 h | 1 | ~4 h |
-| UNet | ~4–6 h | 1 | ~5 h |
-| SegMamba (optional) | ~8 h | 1 | ~8 h |
+| 3D U-Net (wider + thesis configuration) | ~4–6 h | 2 | ~10 h |
+| SegMamba (+ one-time CUDA build, ~10–20 min) | ~8 h | 1 | ~8 h |
 | Predicted masks + features | ~0.5 h | 1 | ~0.5 h |
 | Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 9 | ~20–40 h |
 | k-fold CV (CPU) | minutes | 1 | – |
 
-Roughly 70–90 T4-hours for one segmentation seed. Ways to trim, in order of least harm:
+Roughly 75–95 T4-hours for one segmentation seed. Ways to trim, in order of least harm (the
+segmentation benchmark keeps all thesis models):
 
-1. drop SegMamba;
-2. SSL to 30 epochs;
-3. 2 classification seeds;
-4. classifier epochs to 60.
+1. SSL to 30 epochs;
+2. 2 classification seeds;
+3. classifier epochs to 60.
 
 **On Colab.** A T4 (15 GB) is enough: the thesis ran the same model sizes on one, and here fp16
 mixed precision and gradient checkpointing are on.

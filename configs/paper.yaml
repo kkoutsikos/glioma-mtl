@@ -29,8 +29,10 @@ segmentation:
     seg_swin_unetr: {config: configs/seg_swin_unetr.yaml}
     seg_swin_unetr_ssl: {config: configs/seg_swin_unetr_ssl.yaml, needs_ssl: true}
     seg_segresnet: {config: configs/seg_segresnet.yaml}
-    seg_unet: {config: configs/seg_unet.yaml}
-    seg_segmamba: {config: configs/seg_segmamba.yaml, optional: true}   # needs the CUDA SegMamba build
+    seg_unet: {config: configs/seg_unet.yaml}                    # 3D residual U-Net, wider (32-320)
+    seg_unet_thesis: {config: configs/seg_unet_thesis.yaml}      # same 3D U-Net with the thesis config (16-256)
+    # Needs the CUDA build from the notebook's SegMamba cell. Optional, so a broken build cannot block the rest.
+    seg_segmamba: {config: configs/seg_segmamba.yaml, optional: true}
 
 classification:
   backbone: seg_swin_unetr_ssl          # segmentation run (first seed) used as backbone + mask predictor
