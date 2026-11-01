@@ -21,6 +21,6 @@ train:
   lr: 1.0e-4
   weight_decay: 1.0e-5
   warmup_epochs: 5
-  accumulation: 16
+  accumulation: 4       # effective batch 8: ~43 updates/epoch on 345 volumes (the thesis' 16 gave only ~11)
   amp: true
   patience: 20

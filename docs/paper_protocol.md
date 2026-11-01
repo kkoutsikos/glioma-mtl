@@ -35,6 +35,8 @@ These further changes are improvements rather than error fixes. State them in th
 - a learnable rotation pretext task: the rotation view is no longer randomly flipped (two in-plane flips
   equal a 180° rotation, which made the label ambiguous), and the rotation head reads a 2×2×2 grid of the
   bottleneck instead of a single globally pooled vector;
+- SSL gradient accumulation 4 instead of 16 (effective batch 8): about 2,150 instead of 540 optimizer
+  updates over 50 epochs, at the same compute;
 - a stronger UNet configuration;
 - checkpoint selection on an EMA-smoothed validation loss.
 
