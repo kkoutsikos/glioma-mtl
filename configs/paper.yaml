@@ -59,7 +59,8 @@ classification:
     cls_cascade: {config: configs/cls_cascade.yaml}                      # frozen encoder, concat fusion
     cls_multiscale: {config: configs/cls_multiscale.yaml}                # stages 2-4 + decoder
     cls_trinity: {config: configs/cls_trinity.yaml, use_radiomics: true} # cross-attention, stages 1-3, SupCon
-    cls_segmamba: {config: configs/cls_segmamba.yaml, use_radiomics: true, backbone: seg_segmamba, optional: true}
+    # Backbone: the SegMamba run with the higher best validation Dice (lr 5e-5: 0.8895 vs 0.8831 at lr 1e-4).
+    cls_segmamba: {config: configs/cls_segmamba.yaml, use_radiomics: true, backbone: seg_segmamba_lr5e5, optional: true}
 
 kfold:                                  # XGBoost / logistic regression / RF / MLP late fusion, repeated k-fold
   config: configs/kfold_cv.yaml

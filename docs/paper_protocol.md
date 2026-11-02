@@ -88,6 +88,11 @@ methods that it was added post hoc and why. It is reported as its own labelled r
 never replaces it, and is never the reference model of the Wilcoxon comparison. If it is used as the
 SegMamba classifier's backbone, choose between the two SegMamba runs on validation Dice, not on test.
 
+Decision: at lr 5e-5 the best validation Dice was 0.8895 by epoch 45, above the 0.8831 of the lr 1e-4 run.
+The best-so-far value can only rise, so this was settled at epoch 70 of 100, before any test result of
+the new run existed. `cls_segmamba` therefore uses `seg_segmamba_lr5e5` as its backbone (`configs/paper.yaml`).
+Its final best validation Dice is in `seg_segmamba_lr5e5_s42/history.csv`.
+
 ### About the k-fold late fusion
 
 The k-fold CV runs over all 162 cohort patients, and every imputer, scaler, feature selector and
