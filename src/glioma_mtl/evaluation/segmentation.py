@@ -65,7 +65,7 @@ def evaluate_segmentation(model: torch.nn.Module, loader, roi_size, device: torc
             raw = pred[0, 0].cpu().numpy()
             kept, n = keep_largest_component(raw)
             row.update(components=n, removed_ml=float(raw.sum() - kept.sum()) / 1000.0)
-            pred = torch.from_numpy(kept)[None, None].to(pred.device)
+            pred[0, 0] = torch.from_numpy(kept).to(pred.device)   # in place: keeps the metadata needed to invert
         if "label" in batch:
             row.update(case_metrics(pred.cpu(), batch["label"].cpu().float()))
         rows.append(row)

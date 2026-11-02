@@ -91,9 +91,13 @@ def test_cleaned_predictions_are_what_is_scored_and_saved():
             logits[..., 26:29, 26:29, 26:29] = 10.0
             return logits
 
+    from monai.data import MetaTensor
+
     label = torch.zeros(1, 1, 32, 32, 32)
     label[..., 4:12, 4:12, 4:12] = 1
-    batch = {"image": torch.zeros(1, 1, 32, 32, 32), "label": label, "patient_id": ["UCSF-PDGM-0001"]}
+    affine = torch.diag(torch.tensor([2.0, 2.0, 2.0, 1.0]))
+    image = MetaTensor(torch.zeros(1, 1, 32, 32, 32), affine=affine)
+    batch = {"image": image, "label": label, "patient_id": ["UCSF-PDGM-0001"]}
     saved = []
     raw = evaluate_segmentation(Fixed(), [batch], (32, 32, 32), torch.device("cpu"), amp=False)
     clean = evaluate_segmentation(Fixed(), [batch], (32, 32, 32), torch.device("cpu"), amp=False,
@@ -101,4 +105,44 @@ def test_cleaned_predictions_are_what_is_scored_and_saved():
     assert raw.loc[0, "dice"] < 1.0 and "components" not in raw
     assert clean.loc[0, "dice"] == pytest.approx(1.0) and clean.loc[0, "hd95"] == 0.0
     assert clean.loc[0, "components"] == 2 and clean.loc[0, "removed_ml"] == pytest.approx(27 / 1000)
-    assert torch.equal(saved[0], label)
+    assert torch.equal(saved[0].as_tensor(), label)
+    # Saving inverts the preprocessing back to the original grid, which needs the image's metadata.
+    assert isinstance(saved[0], MetaTensor) and torch.equal(saved[0].affine, affine)
+
+
+def test_cleaned_masks_are_saved_on_the_original_grid(tmp_path):
+    """The saving path of scripts/evaluate_segmentation.py: invert resampling, then read the affine."""
+    nib = pytest.importorskip("nibabel")
+    from monai.data import DataLoader, Dataset, decollate_batch
+    from monai.transforms import Invertd
+
+    from glioma_mtl.data.transforms import seg_eval_transforms
+
+    affine = np.diag([2.0, 2.0, 2.0, 1.0])               # 2 mm voxels, resampled to 1 mm for the model
+    volume = np.zeros((20, 20, 20), np.float32)
+    volume[2:8, 2:8, 2:8] = 1
+    for name in ("image", "label"):
+        nib.save(nib.Nifti1Image(volume, affine), tmp_path / f"{name}.nii.gz")
+
+    class TumourAndBlob(torch.nn.Module):
+        def forward(self, x):
+            logits = torch.where(x > x.mean(), 10.0, -10.0)
+            logits[..., -4:, -4:, -4:] = 10.0              # false positive in the far corner
+            return logits
+
+    transform = seg_eval_transforms({"spacing": [1.0, 1.0, 1.0], "intensity": {"kind": "zscore"}})
+    record = {"image": str(tmp_path / "image.nii.gz"), "label": str(tmp_path / "label.nii.gz"), "patient_id": "P1"}
+    loader = DataLoader(Dataset([record], transform), batch_size=1)
+    invert = Invertd(keys="pred", transform=transform, orig_keys="image", nearest_interp=True)
+    saved = {}
+
+    def on_prediction(batch, pred):
+        item = invert(decollate_batch({"image": batch["image"], "pred": pred.cpu()})[0])
+        saved["mask"] = (item["pred"][0].numpy() > 0.5).astype(np.uint8)
+        saved["affine"] = np.asarray(item["pred"].affine, dtype=float)
+
+    per_case = evaluate_segmentation(TumourAndBlob(), loader, (32, 32, 32), torch.device("cpu"), amp=False,
+                                     on_prediction=on_prediction, largest_component=True)
+    assert per_case.loc[0, "components"] == 2
+    assert saved["mask"].shape == volume.shape and np.allclose(saved["affine"], affine)
+    assert np.array_equal(saved["mask"], volume.astype(np.uint8))   # tumour only, blob removed
