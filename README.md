@@ -125,7 +125,7 @@ python scripts/compare_models.py runs/seg_segresnet/per_case_segmentation_test.c
 **4. Predicted masks** for test-time localisation of the classification crops:
 
 ```bash
-python scripts/evaluate_segmentation.py --config configs/seg_swin_unetr_ssl.yaml --checkpoint runs/seg_swin_unetr_ssl/best.pt --stage classification --split test --save-predictions data/predictions/swin
+python scripts/evaluate_segmentation.py --config configs/seg_swin_unetr_ssl.yaml --checkpoint runs/seg_swin_unetr_ssl/best.pt --stage classification --split test --save-predictions data/predictions/swin --largest-component
 ```
 
 (and the same with `--split val`)

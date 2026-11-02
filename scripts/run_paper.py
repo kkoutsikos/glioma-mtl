@@ -7,7 +7,8 @@
 Each step is a subprocess call of one of the scripts in this folder. A finished step writes a marker
 in ``<output_root>/.done/``, so re-running skips it; training scripts themselves resume from
 ``last.pt``. Use ``--redo STEP_ID`` to force a step again. ``aggregate`` and ``figures`` never get a
-marker: they rerun every time they are selected, so they always reflect the finished runs.
+marker: they rerun every time they are selected, so they always reflect the finished runs. A step with a
+``version`` reruns when its marker was written by an older version of that step.
 
 Stages: splits, ssl, seg, predict, features, cls, kfold, aggregate.
 """
@@ -26,6 +27,8 @@ import yaml
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 STAGES = ["splits", "ssl", "seg", "predict", "features", "cls", "explain", "kfold", "aggregate", "figures"]
+# Version of the predicted masks. Predicting and feature extraction rerun when their markers predate it.
+MASKS_VERSION = "largest-component"
 
 
 @dataclass
@@ -37,10 +40,15 @@ class Step:
     needs: list[str] = field(default_factory=list)  # step ids that must have succeeded
     run_dir: Path | None = None                     # training steps: where last.pt lives
     always: bool = False                            # summary steps: rerun whenever selected, no marker
+    version: str = ""                               # a marker without this version does not count as done
 
 
 def _script(name: str) -> str:
     return str(HERE / name)
+
+
+def is_done(marker: Path, step: Step) -> bool:
+    return marker.exists() and (not step.version or f"version: {step.version}" in marker.read_text())
 
 
 def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]:
@@ -93,9 +101,9 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
         for part in ("train", "val", "test"):
             steps.append(Step(f"predict:{part}", "predict", [
                 _script("evaluate_segmentation.py"), "--config", bb_spec["config"], "--checkpoint", bb_ckpt,
-                "--stage", "classification", "--split", part, "--save-predictions", pred_dir,
+                "--stage", "classification", "--split", part, "--save-predictions", pred_dir, "--largest-component",
                 "--out-dir", (root / bb).as_posix(), *sets(seg.get("overrides"), [f"name={bb}"])],
-                needs=[f"seg_train:{bb}"]))
+                needs=[f"seg_train:{bb}"], version=MASKS_VERSION))
         predicted = [f"predict:{p}" for p in ("train", "val", "test")]
         fcfg = cls["feature_config"]
         deep_csv = (root / "deep_features" / "deep_features_pred.csv").as_posix()
@@ -103,11 +111,11 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
         steps.append(Step("features:deep", "features", [
             _script("extract_deep_features.py"), "--config", fcfg, "--checkpoint", bb_ckpt, "--mask-source", "pred",
             "--pred-dir", pred_dir, "--out-dir", (root / "deep_features").as_posix(), *sets([], ["name=deep_features"])],
-            needs=predicted))
+            needs=predicted, version=MASKS_VERSION))
         steps.append(Step("features:radiomics", "features", [
             _script("extract_radiomics.py"), "--config", fcfg, "--mask-source", "pred", "--pred-dir", pred_dir,
             "--out-dir", (root / "radiomics").as_posix(), *sets([], ["name=radiomics"])],
-            optional=not (kfold or {}).get("use_radiomics"), needs=predicted))
+            optional=not (kfold or {}).get("use_radiomics"), needs=predicted, version=MASKS_VERSION))
 
         for exp, spec in (cls.get("experiments") or {}).items():
             exp_seeds = spec.get("seeds", cls.get("seeds", [42]))
@@ -189,7 +197,7 @@ def main() -> None:
         marker = done_dir / (step.id.replace(":", "__") + ".done")
         selected = step.stage in args.stages and (args.only is None or step.id in args.only)
         # Tables and figures summarise whatever has finished so far, so a marker must never freeze them.
-        if marker.exists() and step.id not in args.redo and not step.always:
+        if is_done(marker, step) and step.id not in args.redo and not step.always:
             status[step.id] = "done"
             continue
         if not selected:
@@ -210,7 +218,8 @@ def main() -> None:
         minutes = (time.time() - start) / 60
         if code == 0:
             if not step.always:
-                marker.write_text(f"{time.ctime()} ({minutes:.1f} min)\n")
+                marker.write_text(f"{time.ctime()} ({minutes:.1f} min)\n"
+                                  + (f"version: {step.version}\n" if step.version else ""))
             status[step.id] = "ok"
             print(f"[ok]  {step.id} in {minutes:.1f} min")
             # last.pt (weights + optimizer, ~750 MB for SwinUNETR) is only needed to resume an unfinished

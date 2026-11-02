@@ -31,6 +31,11 @@ These further changes are improvements rather than error fixes. State them in th
 - per-volume z-score intensity normalisation instead of a fixed [0, 3000] window;
 - tumour-centred classification crops (predicted mask at test time) instead of 50% background / centre
   crops;
+- the predicted masks used downstream (crop centre, radiomics) keep only their largest connected
+  component, so a stray false-positive blob cannot move the crop off the tumour or enter the shape
+  features. This was decided from the validation HD95 during segmentation training, before any classifier
+  had run. It drops genuine satellite lesions of multifocal tumours; the segmentation benchmark itself is
+  reported on the raw predictions of every model;
 - cube masking for SSL instead of voxel masking;
 - a learnable rotation pretext task: the rotation view is no longer randomly flipped (two in-plane flips
   equal a 180° rotation, which made the label ambiguous), and the rotation head reads a 2×2×2 grid of the
@@ -67,7 +72,7 @@ reference rows.
 | `<run>/best.pt`, `config.yaml`, `history.csv`, `log.txt` | weights, the exact config, per-epoch metrics and log of every SSL, segmentation and classifier run (`last.pt` is removed once a run finishes) |
 | `<run>/model_info.json`, `history.csv` columns `epoch_seconds`, `peak_mem_gb`, `gpu` | compute cost of every segmentation and classifier run: parameter count, wall time and peak GPU memory per epoch, GPU type (the segmentation table reports them next to inference time per case). For epochs trained before cost logging existed, the tables and curves fill the gaps from the timestamped epoch lines in `log.txt`; such training times are marked "~" |
 | `<seg run>/per_case_segmentation_test.csv`, `summary_*.csv` | per-patient Dice / IoU / HD95 / NSD / sensitivity / precision; bootstrap summary |
-| `predictions/<backbone>/` | predicted tumour masks (NIfTI, original grid) of the classification cohort |
+| `predictions/<backbone>/` | predicted tumour masks (NIfTI, original grid, largest connected component) of the classification cohort; `<backbone run>/per_case_classification_<split>.csv` scores them and records per patient how many components the raw prediction had (`components`) and how much was removed (`removed_ml`) |
 | `<cls run>/predictions_test.csv`, `metrics_test.csv`, `val_predictions_best.csv`, `featurizers.pkl` | test probabilities and metrics with CIs; fitted clinical / radiomics preprocessing |
 | `<cls run, first seed>/explain/` | `attention.csv`, `occlusion.csv` (+ summaries and plots), `gradcam/<patient>_<task>_<map>.png` |
 | `deep_features/`, `radiomics/` | label-free deep features and radiomics of the cohort |

@@ -9,7 +9,17 @@ import torch
 from monai.inferers import sliding_window_inference
 from monai.metrics import (compute_dice, compute_hausdorff_distance, compute_iou,
                            compute_surface_dice)
+from scipy import ndimage
 from tqdm import tqdm
+
+
+def keep_largest_component(mask: np.ndarray) -> tuple[np.ndarray, int]:
+    """Largest 26-connected foreground component of a binary 3D mask, and how many components there were."""
+    labels, n = ndimage.label(mask > 0, structure=np.ones((3, 3, 3), dtype=bool))
+    if n <= 1:
+        return mask, n
+    sizes = np.bincount(labels.ravel())[1:]
+    return (labels == sizes.argmax() + 1).astype(mask.dtype), n
 
 
 def case_metrics(pred: torch.Tensor, gt: torch.Tensor, nsd_tolerance_mm: float = 1.0) -> dict[str, float]:
@@ -32,10 +42,12 @@ def case_metrics(pred: torch.Tensor, gt: torch.Tensor, nsd_tolerance_mm: float =
 @torch.no_grad()
 def evaluate_segmentation(model: torch.nn.Module, loader, roi_size, device: torch.device,
                           sw_batch_size: int = 2, overlap: float = 0.5, amp: bool = True,
-                          on_prediction=None) -> pd.DataFrame:
+                          on_prediction=None, largest_component: bool = False) -> pd.DataFrame:
     """Sliding-window inference on whole volumes; one row per patient.
 
     ``on_prediction(batch, binary_pred)`` is called per case (used to save predicted masks).
+    ``largest_component`` keeps only the largest connected component of each prediction before the metrics
+    and ``on_prediction``, and adds the columns ``components`` (before cleanup) and ``removed_ml``.
     """
     model.eval()
     rows = []
@@ -49,6 +61,11 @@ def evaluate_segmentation(model: torch.nn.Module, loader, roi_size, device: torc
         elapsed = time.perf_counter() - start
         pred = (torch.sigmoid(logits.float()) > 0.5).float()
         row = {"patient_id": batch["patient_id"][0], "seconds": elapsed}
+        if largest_component:
+            raw = pred[0, 0].cpu().numpy()
+            kept, n = keep_largest_component(raw)
+            row.update(components=n, removed_ml=float(raw.sum() - kept.sum()) / 1000.0)
+            pred = torch.from_numpy(kept)[None, None].to(pred.device)
         if "label" in batch:
             row.update(case_metrics(pred.cpu(), batch["label"].cpu().float()))
         rows.append(row)

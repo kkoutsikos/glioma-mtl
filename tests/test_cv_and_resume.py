@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 def _load_script(name):
     spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module   # dataclasses look their module up here
     spec.loader.exec_module(module)
     return module
 
@@ -194,3 +196,25 @@ def test_deep_features_use_mask_and_one_row_per_patient():
     assert list(oracle.index) == ["UCSF-PDGM-0001", "UCSF-PDGM-0002"]
     assert oracle.shape[1] == 12 * 4 + 12 * 16 + 12          # stage 2 + stage 4 + decoder
     assert not np.allclose(oracle.values, pred.values)        # pooling region matters
+
+
+def test_masks_from_before_the_cleanup_are_predicted_again(tmp_path):
+    """Markers written before the largest-component cleanup must not count as done (stale masks on Drive)."""
+    import yaml
+
+    runner = _load_script("run_paper")
+    plan = yaml.safe_load((runner.REPO / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    steps = {s.id: s for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]}
+    for part in ("train", "val", "test"):
+        assert "--largest-component" in steps[f"predict:{part}"].args
+    for step_id in ("predict:test", "features:deep", "features:radiomics"):
+        step = steps[step_id]
+        assert step.version == runner.MASKS_VERSION
+        marker = tmp_path / "marker.done"
+        marker.write_text("Mon Nov  2 16:35:49 2026 (1.2 min)\n")
+        assert not runner.is_done(marker, step)
+        marker.write_text(f"Mon Nov  2 18:00:00 2026 (1.2 min)\nversion: {step.version}\n")
+        assert runner.is_done(marker, step)
+    old = tmp_path / "seg.done"
+    old.write_text("Mon Nov  2 12:00:00 2026 (170.0 min)\n")
+    assert runner.is_done(old, steps["seg_train:seg_swin_unetr_ssl_s42"])   # unversioned steps are unaffected

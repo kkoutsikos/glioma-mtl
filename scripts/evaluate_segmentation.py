@@ -3,7 +3,12 @@
     python scripts/evaluate_segmentation.py --config configs/seg_segresnet.yaml --checkpoint runs/seg_segresnet/best.pt
     # predicted masks for test-time classification crops (classification val/test patients):
     python scripts/evaluate_segmentation.py --config configs/seg_swin_unetr_ssl.yaml \
-        --checkpoint runs/seg_swin_unetr_ssl/best.pt --stage classification --split test --save-predictions data/predictions/swin
+        --checkpoint runs/seg_swin_unetr_ssl/best.pt --stage classification --split test --save-predictions data/predictions/swin \
+        --largest-component
+
+``--largest-component`` keeps only the largest connected component of each predicted mask, so a stray
+false-positive blob cannot pull the classification crop off the tumour or enter the radiomics. The
+segmentation benchmark (``--stage segmentation``) is reported on the raw predictions.
 """
 from pathlib import Path
 
@@ -27,6 +32,8 @@ def _args(parser):
     parser.add_argument("--stage", default="segmentation", choices=["segmentation", "classification"])
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     parser.add_argument("--save-predictions", default=None, help="folder for <patient_id>.nii.gz masks")
+    parser.add_argument("--largest-component", action="store_true",
+                        help="keep only the largest connected component of each prediction (metrics and saved masks)")
     parser.add_argument("--out-dir", default=None)
 
 
@@ -54,7 +61,12 @@ def main() -> None:
             affine = np.asarray(item["pred"].affine, dtype=float)
             nib.save(nib.Nifti1Image(mask, affine), save_dir / f"{batch['patient_id'][0]}.nii.gz")
 
-    per_case = evaluate_segmentation(model, loader, d["roi_size"], device, on_prediction=on_prediction)
+    per_case = evaluate_segmentation(model, loader, d["roi_size"], device, on_prediction=on_prediction,
+                                     largest_component=args.largest_component)
+    if args.largest_component:
+        cleaned = per_case[per_case["components"] > 1]
+        LOG.info("Largest component kept: %d/%d cases had extra components, %.1f mL removed in total (max %.1f mL)",
+                 len(cleaned), len(per_case), cleaned["removed_ml"].sum(), per_case["removed_ml"].max())
     tag = f"{args.stage}_{args.split}"
     per_case.to_csv(out_dir / f"per_case_{tag}.csv", index=False)
     summary = summarize_segmentation(per_case)

@@ -4,7 +4,8 @@ import torch
 
 from glioma_mtl.config import apply_overrides
 from glioma_mtl.data.transforms import CropAroundMaskd, ssl_transforms
-from glioma_mtl.evaluation import bootstrap_ci, classification_metrics
+from glioma_mtl.evaluation import (bootstrap_ci, classification_metrics, evaluate_segmentation,
+                                  keep_largest_component)
 from glioma_mtl.utils import load_weights, save_checkpoint
 
 
@@ -68,3 +69,36 @@ def test_bootstrap_and_classification_metrics():
     table, cm = classification_metrics(y, prob / prob.sum(1, keepdims=True), ["2", "3", "4"])
     acc = table.set_index("metric").loc["accuracy"]
     assert acc["value"] == 1.0 and cm.trace() == 40
+
+
+def test_keep_largest_component_drops_stray_blobs():
+    mask = np.zeros((40, 40, 40), dtype=np.uint8)
+    mask[5:15, 5:15, 5:15] = 1          # tumour
+    mask[30:33, 30:33, 30:33] = 1       # false-positive blob on the far side
+    mask[15, 15, 15] = 1                # touches the tumour diagonally: same component (26-connectivity)
+    kept, n = keep_largest_component(mask)
+    assert n == 2 and kept.dtype == mask.dtype
+    assert kept.sum() == 10 ** 3 + 1 and kept[30:33, 30:33, 30:33].sum() == 0
+    empty = np.zeros_like(mask)
+    assert keep_largest_component(empty)[1] == 0 and not keep_largest_component(empty)[0].any()
+
+
+def test_cleaned_predictions_are_what_is_scored_and_saved():
+    class Fixed(torch.nn.Module):     # predicts the tumour plus a distant blob, whatever the input
+        def forward(self, x):
+            logits = torch.full_like(x, -10.0)
+            logits[..., 4:12, 4:12, 4:12] = 10.0
+            logits[..., 26:29, 26:29, 26:29] = 10.0
+            return logits
+
+    label = torch.zeros(1, 1, 32, 32, 32)
+    label[..., 4:12, 4:12, 4:12] = 1
+    batch = {"image": torch.zeros(1, 1, 32, 32, 32), "label": label, "patient_id": ["UCSF-PDGM-0001"]}
+    saved = []
+    raw = evaluate_segmentation(Fixed(), [batch], (32, 32, 32), torch.device("cpu"), amp=False)
+    clean = evaluate_segmentation(Fixed(), [batch], (32, 32, 32), torch.device("cpu"), amp=False,
+                                  on_prediction=lambda b, pred: saved.append(pred), largest_component=True)
+    assert raw.loc[0, "dice"] < 1.0 and "components" not in raw
+    assert clean.loc[0, "dice"] == pytest.approx(1.0) and clean.loc[0, "hd95"] == 0.0
+    assert clean.loc[0, "components"] == 2 and clean.loc[0, "removed_ml"] == pytest.approx(27 / 1000)
+    assert torch.equal(saved[0], label)
