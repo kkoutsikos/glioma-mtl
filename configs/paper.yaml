@@ -33,6 +33,9 @@ segmentation:
     seg_unet_thesis: {config: configs/seg_unet_thesis.yaml}      # same 3D U-Net with the thesis config (16-256)
     # Needs the CUDA build from the notebook's SegMamba cell. Optional, so a broken build cannot block the rest.
     seg_segmamba: {config: configs/seg_segmamba.yaml, optional: true}
+    # Sensitivity run added after the main results (thesis lr 5e-5). Its own row, labelled; never the
+    # reference "best" model of the Wilcoxon comparison.
+    seg_segmamba_lr5e5: {config: configs/seg_segmamba_lr5e5.yaml, optional: true, sensitivity: true}
 
 classification:
   backbone: seg_swin_unetr_ssl          # segmentation run (first seed) used as backbone + mask predictor

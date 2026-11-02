@@ -66,7 +66,9 @@ def qualitative_cases(plan: dict, root: Path, out: Path, averaged: dict[str, pd.
 
     if not averaged:
         return
-    best = max(averaged, key=lambda m: averaged[m]["dice"].mean())
+    models = plan["segmentation"]["models"]
+    main = [m for m in averaged if not models[m].get("sensitivity")] or list(averaged)
+    best = max(main, key=lambda m: averaged[m]["dice"].mean())
     ranked = averaged[best].sort_values("dice", ascending=False).reset_index(drop=True)
     picks = ranked.iloc[[0, len(ranked) // 2, len(ranked) - 1][:n_cases]]["patient_id"].tolist()
     seed = plan["segmentation"].get("seeds", [42])[0]

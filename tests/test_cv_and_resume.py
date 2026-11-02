@@ -88,6 +88,19 @@ def test_segmentation_table_reports_cost(tmp_path):
         ("5.0", "1.0", "7.5", "1.50", "A100")
     assert table.set_index("model").loc["seg_a", "p_dice_vs_best"] == "best"
 
+    # A sensitivity run added after the main results is shown and tested, but never becomes the reference,
+    # even when it scores highest.
+    run = tmp_path / "seg_c_s42"
+    run.mkdir()
+    pd.DataFrame({"patient_id": [f"p{i}" for i in range(12)], "dice": 0.95 + rng.normal(0, 0.01, 12),
+                  "hd95": 4.0, "nsd": 0.9, "iou": 0.9, "sensitivity": 0.9, "precision": 0.9,
+                  "seconds": 1.5}).to_csv(run / "per_case_segmentation_test.csv", index=False)
+    models = {"seg_a": {}, "seg_b": {}, "seg_c": {"sensitivity": True}}
+    table, _ = agg.segmentation_table({"segmentation": {"models": models, "seeds": [42]}}, tmp_path)
+    table = table.set_index("model")
+    assert table.loc["seg_a", "p_dice_vs_best"] == "best"
+    assert float(table.loc["seg_c (sensitivity)", "p_dice_vs_best"]) < 0.05
+
 
 def test_classifier_trains_and_logs_cost(tmp_path):
     model = MultiTaskGliomaNet({"grade": 3}, feature_size=12, use_checkpoint=False)

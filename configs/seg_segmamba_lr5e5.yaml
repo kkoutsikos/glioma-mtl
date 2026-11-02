@@ -1,0 +1,9 @@
+inherit: seg_segmamba.yaml
+name: seg_segmamba_lr5e5
+
+# Sensitivity run, added after the main segmentation results: SegMamba at the thesis learning rate.
+# With the shared lr 1e-4 its validation Dice peaked at epoch 35 (0.883) and then fell to 0.73-0.82 while the
+# training loss kept falling. Only the learning rate changes; epochs, warmup, data and checkpoint selection
+# on validation Dice are identical. Reported as its own labelled row, next to (not instead of) seg_segmamba.
+train:
+  lr: 5.0e-5

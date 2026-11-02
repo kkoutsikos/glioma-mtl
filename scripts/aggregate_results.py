@@ -138,7 +138,9 @@ def segmentation_table(plan: dict, root: Path) -> tuple[pd.DataFrame, pd.DataFra
         return cat.groupby("patient_id")[SEG_METRICS].mean().reset_index()
 
     averaged = {m: seed_avg(f) for m, f in per_model.items()}
-    best = max(averaged, key=lambda m: averaged[m]["dice"].mean())
+    # Sensitivity runs (added after the main results) are compared, but never become the reference model.
+    sensitivity = {m for m in averaged if seg["models"][m].get("sensitivity")}
+    best = max([m for m in averaged if m not in sensitivity] or averaged, key=lambda m: averaged[m]["dice"].mean())
     others = [m for m in averaged if m != best]
     p_dice = holm([paired_wilcoxon(averaged[m], averaged[best], "dice")["p_value"] for m in others]) if others else []
     p_hd = holm([paired_wilcoxon(averaged[m], averaged[best], "hd95")["p_value"] for m in others]) if others else []
@@ -147,7 +149,8 @@ def segmentation_table(plan: dict, root: Path) -> tuple[pd.DataFrame, pd.DataFra
     rows = []
     for model, frames in per_model.items():
         seed_means = pd.DataFrame([f.replace([np.inf, -np.inf], np.nan)[SEG_METRICS].mean() for f in frames])
-        row = {"model": model, "seeds": len(frames), "n": len(averaged[model])}
+        row = {"model": model + (" (sensitivity)" if model in sensitivity else ""), "seeds": len(frames),
+               "n": len(averaged[model])}
         for metric in SEG_METRICS:
             sd = seed_means[metric].std() if len(frames) > 1 else None
             if metric in ("dice", "hd95"):
@@ -233,7 +236,9 @@ def main() -> None:
         seg[1].to_csv(out / "segmentation_per_patient_seed_avg.csv", index=False)
         sections.append(save(seg[0], out, "segmentation", "Segmentation on the test split (mean ± SD over seeds "
                                                            "[95% bootstrap CI]; Wilcoxon vs best, Holm-corrected; "
-                                                           "~ = training time partly estimated from log timestamps)"))
+                                                           "~ = training time partly estimated from log timestamps; "
+                                                           "(sensitivity) = run added after the main results, "
+                                                           "never the reference)"))
     cls = classification_table(plan, root)
     if cls is not None:
         sections.append(save(cls, out, "classification", "Classification on the held-out test split "

@@ -56,7 +56,7 @@ reference rows.
 |---|---|---|---|
 | `splits` | 1 | fixed patient-level split (162 cohort: 112/25/25; 495 segmentation: 345/75/75) | data |
 | `ssl` | 1 | pretrains the SwinUNETR encoder on SSL train/val only | – |
-| `seg` | the 5 thesis architectures (SwinUNETR scratch / +SSL, SegResNet, 3D U-Net, SegMamba) + the 3D U-Net in its thesis configuration, × seeds | which architecture segments whole tumour best on T2; does SSL help (`seg_swin_unetr` vs `seg_swin_unetr_ssl`); was the thesis U-Net result a configuration problem (`seg_unet` vs `seg_unet_thesis`) | `segmentation` |
+| `seg` | the 5 thesis architectures (SwinUNETR scratch / +SSL, SegResNet, 3D U-Net, SegMamba) + the 3D U-Net in its thesis configuration, × seeds; + one sensitivity run, SegMamba at the thesis lr 5e-5 | which architecture segments whole tumour best on T2; does SSL help (`seg_swin_unetr` vs `seg_swin_unetr_ssl`); was the thesis U-Net result a configuration problem (`seg_unet` vs `seg_unet_thesis`); does SegMamba's result depend on the shared learning rate (`seg_segmamba` vs `seg_segmamba_lr5e5`) | `segmentation` |
 | `predict` | backbone on classification train/val/test | predicted masks for crop localisation, deep features, radiomics | – |
 | `features` | 1 + 1 | label-free deep features, radiomics from predicted masks | – |
 | `cls` | 9 experiments × seeds. **Main ladder** (same model, only inputs change): image only → image + clinical → image + clinical + radiomics. A **leaky reference ladder** with the thesis clinical vector (image + thesis clinical → + radiomics) sits side by side with the last two rungs. The corrected thesis architectures (cascade, multi-scale, Trinity, SegMamba backbone) complete the set. | what each input adds for grade / diagnosis / LGG vs HGG; which fusion design helps; what post-operative molecular data explain (reference) | `classification` |
@@ -78,6 +78,15 @@ reference rows.
 | `deep_features/`, `radiomics/` | label-free deep features and radiomics of the cohort |
 | `kfold_cv/` | `cv_results.csv`, `holdout_results.csv`, `holdout_predictions.csv`, `holdout_shap.csv` |
 | `paper_tables/`, `paper_figures/` | all tables (CSV / Markdown / LaTeX) and figures |
+
+### About the SegMamba sensitivity run
+
+`seg_segmamba_lr5e5` was added **after** the main segmentation results were known. Under the shared
+lr 1e-4, SegMamba's validation Dice peaked at epoch 35 (0.883) and then fell to 0.73–0.82 while its training
+loss kept falling. The thesis trained it at 5e-5. The extra run changes only the learning rate. Say in the
+methods that it was added post hoc and why. It is reported as its own labelled row next to `seg_segmamba`,
+never replaces it, and is never the reference model of the Wilcoxon comparison. If it is used as the
+SegMamba classifier's backbone, choose between the two SegMamba runs on validation Dice, not on test.
 
 ### About the k-fold late fusion
 
