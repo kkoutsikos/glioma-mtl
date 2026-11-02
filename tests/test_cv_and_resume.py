@@ -211,6 +211,26 @@ def test_deep_features_use_mask_and_one_row_per_patient():
     assert not np.allclose(oracle.values, pred.values)        # pooling region matters
 
 
+def test_radiomics_leave_an_empty_predicted_mask_missing(tmp_path):
+    import SimpleITK as sitk
+
+    from glioma_mtl.radiomics import extract_radiomics
+
+    image = sitk.GetImageFromArray(np.random.default_rng(0).normal(100, 20, (24, 24, 24)).astype(np.float32))
+    sitk.WriteImage(image, str(tmp_path / "t2.nii.gz"))
+    tumour = np.zeros((24, 24, 24), np.uint8)
+    tumour[6:18, 6:18, 6:18] = 1
+    for name, arr in (("tumour", tumour), ("empty", np.zeros_like(tumour))):
+        mask = sitk.GetImageFromArray(arr)
+        mask.CopyInformation(image)
+        sitk.WriteImage(mask, str(tmp_path / f"{name}.nii.gz"))
+    df = extract_radiomics([("UCSF-PDGM-0001", tmp_path / "t2.nii.gz", tmp_path / "tumour.nii.gz"),
+                            ("UCSF-PDGM-0002", tmp_path / "t2.nii.gz", tmp_path / "empty.nii.gz")],
+                           feature_classes=["firstorder"])
+    assert len(df) == 2 and df.shape[1] > 10
+    assert df.iloc[0].notna().all() and df.iloc[1].isna().all()
+
+
 def test_masks_from_before_the_cleanup_are_predicted_again(tmp_path):
     """Markers written before the largest-component cleanup must not count as done (stale masks on Drive)."""
     import yaml
@@ -222,7 +242,7 @@ def test_masks_from_before_the_cleanup_are_predicted_again(tmp_path):
         assert "--largest-component" in steps[f"predict:{part}"].args
     for step_id in ("predict:test", "features:deep", "features:radiomics"):
         step = steps[step_id]
-        assert step.version == runner.MASKS_VERSION
+        assert step.version.startswith(runner.MASKS_VERSION)
         marker = tmp_path / "marker.done"
         marker.write_text("Mon Nov  2 16:35:49 2026 (1.2 min)\n")
         assert not runner.is_done(marker, step)
@@ -231,3 +251,35 @@ def test_masks_from_before_the_cleanup_are_predicted_again(tmp_path):
     old = tmp_path / "seg.done"
     old.write_text("Mon Nov  2 12:00:00 2026 (170.0 min)\n")
     assert runner.is_done(old, steps["seg_train:seg_swin_unetr_ssl_s42"])   # unversioned steps are unaffected
+
+
+def test_switching_the_backbone_redoes_everything_downstream(tmp_path):
+    """Masks, features and classifiers made with another backbone are redone; their run folders are set aside."""
+    import yaml
+
+    runner = _load_script("run_paper")
+    plan = yaml.safe_load((runner.REPO / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    root_set = [f"output_root={tmp_path.as_posix()}"]
+    new = {s.id: s for s in runner.build_steps(plan, root_set)[0]}
+    plan["classification"]["backbone"] = "seg_swin_unetr_ssl"
+    old = {s.id: s for s in runner.build_steps(plan, root_set)[0]}
+    marker = tmp_path / "marker.done"
+    for step_id in ("predict:val", "features:deep", "features:radiomics", "kfold",
+                    "cls_train:cls_image_only_s42", "cls_eval:cls_image_only_s42", "explain:cls_image_only_s42"):
+        marker.write_text(f"Mon Nov  2 18:00:00 2026 (1.2 min)\nversion: {old[step_id].version}\n")
+        assert runner.is_done(marker, old[step_id]) and not runner.is_done(marker, new[step_id]), step_id
+    assert "seg_segmamba_lr5e5_s42/best.pt" in " ".join(new["cls_train:cls_image_only_s42"].args)
+
+    step = new["cls_train:cls_image_only_s42"]
+    for tag in (None, old[step.id].version):          # folders from before tagging, and from the old backbone
+        step.run_dir.mkdir()
+        (step.run_dir / "last.pt").write_text("SwinUNETR classifier")
+        if tag:
+            (step.run_dir / ".step_version").write_text(tag + "\n")
+        runner.set_aside_stale_run(step, tmp_path, dry_run=False)
+        assert not step.run_dir.exists()
+    assert len(list((tmp_path / ".stale").glob("cls_image_only_s42-*/last.pt"))) == 2
+    step.run_dir.mkdir()                               # an interrupted run of this version resumes
+    (step.run_dir / ".step_version").write_text(step.version + "\n")
+    runner.set_aside_stale_run(step, tmp_path, dry_run=False)
+    assert step.run_dir.exists()

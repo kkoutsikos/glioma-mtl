@@ -34,11 +34,14 @@ segmentation:
     # Needs the CUDA build from the notebook's SegMamba cell. Optional, so a broken build cannot block the rest.
     seg_segmamba: {config: configs/seg_segmamba.yaml, optional: true}
     # Sensitivity run added after the main results (thesis lr 5e-5). Its own row, labelled; never the
-    # reference "best" model of the Wilcoxon comparison.
-    seg_segmamba_lr5e5: {config: configs/seg_segmamba_lr5e5.yaml, optional: true, sensitivity: true}
+    # reference "best" model of the Wilcoxon comparison. Not optional: it is the classification backbone.
+    seg_segmamba_lr5e5: {config: configs/seg_segmamba_lr5e5.yaml, sensitivity: true}
 
 classification:
-  backbone: seg_swin_unetr_ssl          # segmentation run (first seed) used as backbone + mask predictor
+  # Segmentation run (first seed) used as backbone + mask predictor. SegMamba, as in the thesis; switched
+  # from seg_swin_unetr_ssl after the segmentation results (see docs/paper_protocol.md). The classifier
+  # configs' model.backbone (configs/cls_mask_guided.yaml) must be the same architecture.
+  backbone: seg_segmamba_lr5e5
   feature_config: configs/cls_mask_guided.yaml   # data/model settings for deep-feature + radiomics extraction
   # One seed first. Later change to [42, 43, 44]: finished runs are skipped, only the new seeds train,
   # and the tables switch to mean ± SD over seeds.
@@ -59,8 +62,7 @@ classification:
     cls_cascade: {config: configs/cls_cascade.yaml}                      # frozen encoder, concat fusion
     cls_multiscale: {config: configs/cls_multiscale.yaml}                # stages 2-4 + decoder
     cls_trinity: {config: configs/cls_trinity.yaml, use_radiomics: true} # cross-attention, stages 1-3, SupCon
-    # Backbone: the SegMamba run with the higher best validation Dice (lr 5e-5: 0.8895 vs 0.8831 at lr 1e-4).
-    cls_segmamba: {config: configs/cls_segmamba.yaml, use_radiomics: true, backbone: seg_segmamba_lr5e5, optional: true}
+    cls_segmamba: {config: configs/cls_segmamba.yaml, use_radiomics: true}  # peritumoral ring, hard mask
 
 kfold:                                  # XGBoost / logistic regression / RF / MLP late fusion, repeated k-fold
   config: configs/kfold_cv.yaml

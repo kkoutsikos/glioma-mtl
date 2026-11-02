@@ -57,8 +57,9 @@ Install PyTorch for your CUDA version first (https://pytorch.org/get-started/loc
 pip install -e ".[radiomics,boosting,dev]"
 ```
 
-SegMamba is optional and needs a CUDA build of https://github.com/ge-xing/SegMamba (see
-`configs/seg_segmamba.yaml`).
+SegMamba needs a CUDA build of https://github.com/ge-xing/SegMamba (see `configs/seg_segmamba.yaml`;
+on Colab, the notebook's SegMamba cell). It is the paper's shared backbone: it predicts the masks, gives the
+deep features and is the encoder of every classifier (`configs/cls_mask_guided.yaml`, `model.backbone`).
 
 ## Data
 
@@ -125,7 +126,7 @@ python scripts/compare_models.py runs/seg_segresnet/per_case_segmentation_test.c
 **4. Predicted masks** for test-time localisation of the classification crops:
 
 ```bash
-python scripts/evaluate_segmentation.py --config configs/seg_swin_unetr_ssl.yaml --checkpoint runs/seg_swin_unetr_ssl/best.pt --stage classification --split test --save-predictions data/predictions/swin --largest-component
+python scripts/evaluate_segmentation.py --config configs/seg_segmamba_lr5e5.yaml --checkpoint runs/seg_segmamba_lr5e5/best.pt --stage classification --split test --save-predictions data/predictions/segmamba --largest-component
 ```
 
 (and the same with `--split val`)
@@ -139,7 +140,7 @@ python scripts/kfold_cv.py --config configs/kfold_cv.yaml
 **6. Classification:**
 
 ```bash
-python scripts/train_classifier.py --config configs/cls_mask_guided.yaml --set data.crop_mask_key=pred_mask data.pred_mask_dir=data/predictions/swin
+python scripts/train_classifier.py --config configs/cls_mask_guided.yaml --set model.backbone_checkpoint=runs/seg_segmamba_lr5e5/best.pt data.crop_mask_key=pred_mask data.pred_mask_dir=data/predictions/segmamba
 ```
 
 ```bash
@@ -167,7 +168,7 @@ then add `--set radiomics.csv=runs/radiomics/radiomics_label.csv` to the trainin
 repeated stratified 5-fold CV and an optional one-shot hold-out test:
 
 ```bash
-python scripts/extract_deep_features.py --config configs/cls_mask_guided.yaml --checkpoint runs/seg_swin_unetr_ssl/best.pt --mask-source pred --pred-dir data/predictions/swin
+python scripts/extract_deep_features.py --config configs/cls_mask_guided.yaml --checkpoint runs/seg_segmamba_lr5e5/best.pt --mask-source pred --pred-dir data/predictions/segmamba
 ```
 
 ```bash

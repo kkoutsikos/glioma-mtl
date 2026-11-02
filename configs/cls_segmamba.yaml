@@ -1,20 +1,14 @@
 inherit: cls_mask_guided.yaml
 name: cls_segmamba
 
-# Thesis "AdvancedMaskGuidedModel_v3_Mamba": SegMamba backbone (initialised from the trained SegMamba
-# segmentation run), its 768-channel bottleneck pooled inside the binary tumour (core) and in a ring around it
-# (peritumoral), fused with clinical + radiomics tokens; heads for 3-way grade, LGG vs HGG and diagnosis.
+# Thesis "AdvancedMaskGuidedModel_v3_Mamba": SegMamba backbone (the shared one, inherited from
+# cls_mask_guided.yaml), its 768-channel bottleneck pooled inside the binary tumour (core) and in a ring
+# around it (peritumoral), fused with clinical + radiomics tokens; heads for 3-way grade, LGG vs HGG and diagnosis.
 # Fixes vs the thesis: per-sample masked mean (the thesis divided by the whole batch's tumour volume).
 # Needs the CUDA SegMamba build (notebook cell); the runner sets backbone_checkpoint and radiomics.csv.
 tasks: [grade, diagnosis, lgg_hgg]
 
 model:
-  backbone: segmamba
-  backbone_cfg:
-    segmamba_repo: third_party/SegMamba
-    depths: [2, 2, 2, 2]
-    feat_size: [48, 96, 192, 384]
-    hidden_size: 768
   encoder_stages: [4]
   use_decoder_token: false
   mask_mode: hard

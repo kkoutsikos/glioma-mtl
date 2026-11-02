@@ -1,6 +1,6 @@
 """Label-free deep features for late fusion (XGBoost etc.).
 
-Features come from the *segmentation* SwinUNETR (trained with tumour masks only, never with grade /
+Features come from the *segmentation* backbone, SwinUNETR or SegMamba (trained with tumour masks only, never with grade /
 diagnosis labels), pooled inside the tumour mask at selected encoder stages. Because no class label was
 used to produce them, they can be cross-validated over the classification cohort without fold leakage.
 (The thesis took embeddings from the fine-tuned classifier, which had been trained on the same patients'
@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from .models.backbone import swin_unetr_forward
+from .models.backbone import feature_forward
 from .models.classification import masked_mean
 
 
@@ -27,11 +27,12 @@ def extract_deep_features(model, loader, device: torch.device, stages: Sequence[
     ``'label'`` pools inside the ground-truth mask (oracle).
     """
     model.eval().to(device)
+    forward = feature_forward(model)
     rows = []
     for batch in tqdm(loader, desc="deep features", leave=False):
         image = batch["image"].to(device)
         with torch.autocast(device.type, enabled=amp and device.type == "cuda"):
-            out = swin_unetr_forward(model, image)
+            out = forward(model, image)
         mask = torch.sigmoid(out.logits.float()) if mask_source == "pred" else batch["label"].to(device).float()
         blocks = {f"s{s}": masked_mean(out.hidden[s].float(), mask) for s in stages}
         if use_decoder:

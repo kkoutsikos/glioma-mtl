@@ -80,6 +80,12 @@ def extract_radiomics(cases: Iterable[tuple[str, str, str]], settings: Mapping |
         mask_img = sitk.ReadImage(str(mask))
         whole = sitk.Cast(mask_img > 0, sitk.sitkUInt8)
         whole.CopyInformation(mask_img)
+        if not sitk.GetArrayViewFromImage(whole).any():
+            # A predicted mask can be empty; pyradiomics would raise. The row stays NaN and is imputed
+            # by the training-fold featurizers like any other missing value.
+            logging.getLogger("glioma_mtl").warning("%s: empty mask, radiomics left missing", pid)
+            rows.append({"patient_id": normalize_patient_id(pid)})
+            continue
         result = extractor.execute(sitk.ReadImage(str(image)), whole, label=1)
         rows.append({"patient_id": normalize_patient_id(pid),
                      **{k: float(v) for k, v in result.items() if k.startswith("original_")}})

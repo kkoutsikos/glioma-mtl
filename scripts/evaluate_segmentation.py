@@ -67,6 +67,10 @@ def main() -> None:
         cleaned = per_case[per_case["components"] > 1]
         LOG.info("Largest component kept: %d/%d cases had extra components, %.1f mL removed in total (max %.1f mL)",
                  len(cleaned), len(per_case), cleaned["removed_ml"].sum(), per_case["removed_ml"].max())
+        empty = per_case.loc[per_case["components"] == 0, "patient_id"].tolist()
+        if empty:
+            LOG.warning("Empty prediction for %d/%d cases (crop at the volume centre, radiomics imputed): %s",
+                        len(empty), len(per_case), ", ".join(map(str, empty)))
     tag = f"{args.stage}_{args.split}"
     per_case.to_csv(out_dir / f"per_case_{tag}.csv", index=False)
     summary = summarize_segmentation(per_case)

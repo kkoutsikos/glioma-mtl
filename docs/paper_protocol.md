@@ -79,25 +79,31 @@ reference rows.
 | `kfold_cv/` | `cv_results.csv`, `holdout_results.csv`, `holdout_predictions.csv`, `holdout_shap.csv` |
 | `paper_tables/`, `paper_figures/` | all tables (CSV / Markdown / LaTeX) and figures |
 
-### About the SegMamba sensitivity run
+### About the SegMamba sensitivity run and the shared backbone
 
 `seg_segmamba_lr5e5` was added **after** the main segmentation results were known. Under the shared
 lr 1e-4, SegMamba's validation Dice peaked at epoch 35 (0.883) and then fell to 0.73–0.82 while its training
 loss kept falling. The thesis trained it at 5e-5. The extra run changes only the learning rate. Say in the
 methods that it was added post hoc and why. It is reported as its own labelled row next to `seg_segmamba`,
-never replaces it, and is never the reference model of the Wilcoxon comparison. If it is used as the
-SegMamba classifier's backbone, choose between the two SegMamba runs on validation Dice, not on test.
+never replaces it, and is never the reference model of the Wilcoxon comparison.
 
-Decision: at lr 5e-5 the best validation Dice was 0.8895 by epoch 45, above the 0.8831 of the lr 1e-4 run.
-The best-so-far value can only rise, so this was settled at epoch 70 of 100, before any test result of
-the new run existed. `cls_segmamba` therefore uses `seg_segmamba_lr5e5` as its backbone (`configs/paper.yaml`).
-Its final best validation Dice is in `seg_segmamba_lr5e5_s42/history.csv`.
+**Shared backbone.** The plan first used `seg_swin_unetr_ssl`. After the segmentation results it was
+switched to SegMamba, the architecture the thesis was built on. SegMamba now predicts the masks that
+position every crop, gives the deep features (pooled inside its own predicted probability) and the
+radiomics masks, and is the encoder of every classifier (`configs/cls_mask_guided.yaml`). The SSL-pretrained
+SwinUNETR now appears only in the segmentation comparison. Between the two SegMamba runs the lr 5e-5
+run was chosen on validation Dice (0.8932 by epoch 80, against 0.8831 at lr 1e-4), before its test result
+existed; its final best is in `seg_segmamba_lr5e5_s42/history.csv`. In the methods, say that the
+backbone follows the thesis design and was fixed after the segmentation benchmark. Do not present it as
+the best segmentation model unless the segmentation table shows that. Report how many classification
+patients got an empty or near-empty predicted mask (`per_case_classification_<split>.csv`): their crops
+fall back to the volume centre and their radiomics are imputed.
 
 ### About the k-fold late fusion
 
 The k-fold CV runs over all 162 cohort patients, and every imputer, scaler, feature selector and
-classifier is refit inside each training fold. The deep features come from the segmentation SwinUNETR,
-which was trained with tumour masks only, so no class label leaks across folds. It *has* seen the images
+classifier is refit inside each training fold. The deep features come from the segmentation backbone
+(SegMamba), which was trained with tumour masks only, so no class label leaks across folds. It *has* seen the images
 (and masks) of the classification train/val patients during segmentation training. State this, and use
 the **hold-out** result (fit on train+val, scored once on the 25 test patients no model has seen) as the
 fully clean confirmation. XGBoost uses the thesis hyperparameters (200 trees, depth 4, learning rate
@@ -161,7 +167,7 @@ sessions.
   by looking at it.
 - Limitations to state: single centre; T2 only; 162-patient balanced cohort (339 grade-4 patients
   excluded); classification crops trained on ground-truth masks; segmentation backbone saw the
-  classification train images; small test set.
+  classification train images and was chosen after the segmentation benchmark; small test set.
 - Expect lower classification numbers than the thesis. That is the point of the correction. The
   segmentation numbers should be close to the thesis, because the corrections there are mostly about
   evaluation.

@@ -99,6 +99,19 @@ def test_segmamba_channel_mismatch_fails_loudly(monkeypatch):
         model(torch.randn(1, 1, ROI, ROI, ROI))
 
 
+def test_deep_features_from_a_segmamba_backbone():
+    from glioma_mtl.features import extract_deep_features
+
+    model = StubSegMamba(feat=(4, 8, 16, 32), hidden=64)
+    label = torch.zeros(2, 1, ROI, ROI, ROI)
+    label[:, :, 20:40, 20:40, 20:40] = 1
+    loader = [{"image": torch.randn(2, 1, ROI, ROI, ROI), "label": label,
+               "patient_id": ["UCSF-PDGM-0001", "UCSF-PDGM-0002"]}]
+    df = extract_deep_features(model, loader, torch.device("cpu"), stages=(2, 3, 4), mask_source="label")
+    assert df.shape == (2, 16 + 32 + 64 + 4)        # stages 2, 3, the bottleneck and the decoder
+    assert np.isfinite(df.values).all() and df.std().gt(0).any()
+
+
 def test_peritumoral_ring_excludes_core():
     model = MultiTaskGliomaNet({"grade": 3}, feature_size=12, use_checkpoint=False, peritumoral=True,
                                peritumoral_dilation=2)

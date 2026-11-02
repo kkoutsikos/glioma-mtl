@@ -8,7 +8,10 @@ Each step is a subprocess call of one of the scripts in this folder. A finished 
 in ``<output_root>/.done/``, so re-running skips it; training scripts themselves resume from
 ``last.pt``. Use ``--redo STEP_ID`` to force a step again. ``aggregate`` and ``figures`` never get a
 marker: they rerun every time they are selected, so they always reflect the finished runs. A step with a
-``version`` reruns when its marker was written by an older version of that step.
+``version`` reruns when its marker was written by an older version of that step. Its version names the
+masks (cleanup and the backbone that predicted them) and, for classifiers, the backbone, so switching
+``classification.backbone`` reruns everything downstream. A classifier folder trained for another version
+is moved to ``<output_root>/.stale/`` instead of being resumed.
 
 Stages: splits, ssl, seg, predict, features, cls, kfold, aggregate.
 """
@@ -49,6 +52,21 @@ def _script(name: str) -> str:
 
 def is_done(marker: Path, step: Step) -> bool:
     return marker.exists() and (not step.version or f"version: {step.version}" in marker.read_text())
+
+
+def set_aside_stale_run(step: Step, root: Path, dry_run: bool) -> None:
+    """A run folder written for another version of its step (e.g. another backbone) must not be resumed."""
+    tag = step.run_dir / ".step_version"
+    if not step.run_dir.exists() or (tag.exists() and tag.read_text().strip() == step.version):
+        return
+    name = f"{step.run_dir.name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    old, i = root / ".stale" / name, 1
+    while old.exists():
+        old, i = root / ".stale" / f"{name}-{i}", i + 1
+    print(f"      {step.run_dir.name} was trained for another version of this step: moving it to {old}")
+    if not dry_run:
+        old.parent.mkdir(parents=True, exist_ok=True)
+        step.run_dir.rename(old)
 
 
 def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]:
@@ -98,12 +116,13 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
         bb_spec = seg["models"][bb_model]
         bb_ckpt = (root / bb / "best.pt").as_posix()
         pred_dir = (root / "predictions" / bb).as_posix()
+        masks = f"{MASKS_VERSION} from {bb}"  # anything that uses the predicted masks or features
         for part in ("train", "val", "test"):
             steps.append(Step(f"predict:{part}", "predict", [
                 _script("evaluate_segmentation.py"), "--config", bb_spec["config"], "--checkpoint", bb_ckpt,
                 "--stage", "classification", "--split", part, "--save-predictions", pred_dir, "--largest-component",
                 "--out-dir", (root / bb).as_posix(), *sets(seg.get("overrides"), [f"name={bb}"])],
-                needs=[f"seg_train:{bb}"], version=MASKS_VERSION))
+                needs=[f"seg_train:{bb}"], version=masks))
         predicted = [f"predict:{p}" for p in ("train", "val", "test")]
         fcfg = cls["feature_config"]
         deep_csv = (root / "deep_features" / "deep_features_pred.csv").as_posix()
@@ -111,18 +130,20 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
         steps.append(Step("features:deep", "features", [
             _script("extract_deep_features.py"), "--config", fcfg, "--checkpoint", bb_ckpt, "--mask-source", "pred",
             "--pred-dir", pred_dir, "--out-dir", (root / "deep_features").as_posix(), *sets([], ["name=deep_features"])],
-            needs=predicted, version=MASKS_VERSION))
+            needs=predicted, version=masks))
         steps.append(Step("features:radiomics", "features", [
             _script("extract_radiomics.py"), "--config", fcfg, "--mask-source", "pred", "--pred-dir", pred_dir,
             "--out-dir", (root / "radiomics").as_posix(), *sets([], ["name=radiomics"])],
-            optional=not (kfold or {}).get("use_radiomics"), needs=predicted, version=MASKS_VERSION))
+            optional=not (kfold or {}).get("use_radiomics"), needs=predicted, version=masks))
 
         for exp, spec in (cls.get("experiments") or {}).items():
             exp_seeds = spec.get("seeds", cls.get("seeds", [42]))
-            # Classifier backbone: the shared one, or e.g. seg_segmamba for the SegMamba classifier.
-            # Crops are always centred on the shared backbone's predicted masks, so all classifiers see the same crops.
+            # Classifier backbone: the shared one, or another segmentation model key of the same architecture as
+            # the config's model.backbone. Crops are always centred on the shared backbone's predicted masks,
+            # so all classifiers see the same crops.
             exp_bb = f"{spec.get('backbone', bb_model)}_s{seeds[0]}"
             exp_ckpt = (root / exp_bb / "best.pt").as_posix()
+            trained = f"{masks}, backbone {exp_bb}"
             for seed in exp_seeds:
                 name = f"{exp}_s{seed}"
                 run = (root / name).as_posix()
@@ -134,20 +155,22 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                     needs.append("features:radiomics")
                 steps.append(Step(f"cls_train:{name}", "cls", [_script("train_classifier.py"), "--config", spec["config"],
                                                               *sets(cls.get("overrides"), extra)],
-                                  optional=spec.get("optional", False), needs=needs, run_dir=root / name))
+                                  optional=spec.get("optional", False), needs=needs, run_dir=root / name,
+                                  version=trained))
                 steps.append(Step(f"cls_eval:{name}", "cls", [_script("evaluate_classifier.py"), "--config",
                                                              f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",
                                                              "--split", "test", "--out-dir", run,
                                                              *sets([], ["data.crop_mask_key=pred_mask",
                                                                         f"data.pred_mask_dir={pred_dir}"])],
-                                  optional=spec.get("optional", False), needs=[f"cls_train:{name}", "predict:test"]))
+                                  optional=spec.get("optional", False), needs=[f"cls_train:{name}", "predict:test"],
+                                  version=trained))
             first = f"{exp}_s{exp_seeds[0]}"
             run = (root / first).as_posix()
             steps.append(Step(f"explain:{first}", "explain", [
                 _script("explain_classifier.py"), "--config", f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",
                 "--split", "test", "--out-dir", f"{run}/explain",
                 *sets([], ["data.crop_mask_key=pred_mask", f"data.pred_mask_dir={pred_dir}"])],
-                optional=True, needs=[f"cls_train:{first}", "predict:test"]))
+                optional=True, needs=[f"cls_train:{first}", "predict:test"], version=trained))
 
     if kfold:
         extra = []
@@ -161,7 +184,8 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
         steps.append(Step("kfold", "kfold", [_script("kfold_cv.py"), "--config", kfold["config"],
                                              *(["--holdout"] if kfold.get("holdout") else []),
                                              "--out-dir", (root / "kfold_cv").as_posix(),
-                                             *sets(kfold.get("overrides"), extra)], needs=needs))
+                                             *sets(kfold.get("overrides"), extra)], needs=needs,
+                              version=masks if len(needs) > 1 else ""))
 
     steps.append(Step("aggregate", "aggregate", [_script("aggregate_results.py"), "--plan", "PLAN",
                                                  "--root", root.as_posix(), "--out", (root / "paper_tables").as_posix()],
@@ -210,9 +234,14 @@ def main() -> None:
             continue
         cmd = [sys.executable, *[args.plan if a == "PLAN" else a for a in step.args]]
         print(f"\n[run] {step.id}\n      {' '.join(cmd[1:])}", flush=True)
+        if step.run_dir and step.version:
+            set_aside_stale_run(step, root, args.dry_run)
         if args.dry_run:
             status[step.id] = "ok"  # pretend, so the full dependency chain is listed
             continue
+        if step.run_dir and step.version:
+            step.run_dir.mkdir(parents=True, exist_ok=True)
+            (step.run_dir / ".step_version").write_text(step.version + "\n")
         start = time.time()
         code = subprocess.call(cmd, env=env)
         minutes = (time.time() - start) / 60

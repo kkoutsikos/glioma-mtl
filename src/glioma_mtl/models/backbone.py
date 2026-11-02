@@ -64,6 +64,11 @@ def segmamba_stage_channels(feat_size, hidden_size: int = 768) -> list[int]:
     return [*list(feat_size)[:4], hidden_size]
 
 
+def feature_forward(model: torch.nn.Module):
+    """``f(model, x) -> SwinOutputs`` for a segmentation SwinUNETR or SegMamba (hooks registered once, here)."""
+    return swin_unetr_forward if isinstance(model, SwinUNETR) else SegMambaFeatures(model)
+
+
 def swin_unetr_forward(model: SwinUNETR, x: torch.Tensor) -> SwinOutputs:
     """Same computation as ``SwinUNETR.forward`` (MONAI >= 1.3), exposing intermediate features."""
     hidden = model.swinViT(x, model.normalize)

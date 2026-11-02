@@ -1,24 +1,29 @@
-"""Extract label-free tumour features from a trained segmentation SwinUNETR for the classification cohort.
+"""Extract label-free tumour features from a trained segmentation model (SwinUNETR or SegMamba) for the classification cohort.
 
     python scripts/extract_deep_features.py --config configs/cls_mask_guided.yaml \
-        --checkpoint runs/seg_swin_unetr_ssl_s42/best.pt --mask-source pred --pred-dir runs/predictions/seg_swin_unetr_ssl_s42
+        --checkpoint runs/seg_segmamba_lr5e5_s42/best.pt --mask-source pred --pred-dir runs/predictions/seg_segmamba_lr5e5_s42
 
+The model is rebuilt from the ``config.yaml`` saved next to ``--checkpoint`` (or ``--seg-config``).
 ``--mask-source pred`` centres the crop on, and pools inside, the *predicted* tumour (needs predicted masks
 for all cohort patients, see scripts/evaluate_segmentation.py --save-predictions). ``label`` uses the
 ground-truth mask (oracle localisation).
 """
+from pathlib import Path
+
 from glioma_mtl.cli import start_run
+from glioma_mtl.config import load_config
 from glioma_mtl.data.files import build_records
 from glioma_mtl.data.loaders import make_dataset, make_loader
 from glioma_mtl.data.transforms import cls_eval_transforms
 from glioma_mtl.experiment import load_context
 from glioma_mtl.features import extract_deep_features
-from glioma_mtl.models import build_swin_unetr
+from glioma_mtl.models import build_segmentation_model
 from glioma_mtl.utils import LOG, load_weights
 
 
 def _args(parser):
-    parser.add_argument("--checkpoint", required=True, help="segmentation SwinUNETR best.pt")
+    parser.add_argument("--checkpoint", required=True, help="segmentation run's best.pt")
+    parser.add_argument("--seg-config", default=None, help="config of that run (default: config.yaml next to it)")
     parser.add_argument("--mask-source", choices=["label", "pred"], default="pred")
     parser.add_argument("--pred-dir", default=None)
     parser.add_argument("--stages", nargs="+", type=int, default=[2, 3, 4])
@@ -36,9 +41,10 @@ def main() -> None:
     d = cfg["data"]
     crop_key = "pred_mask" if args.mask_source == "pred" else "label"
     loader = make_loader(make_dataset(records, cls_eval_transforms(d, crop_key)), d, train=False)
-    m = cfg["model"]
-    model = build_swin_unetr(m.get("in_channels", 1), 1, m["feature_size"], use_checkpoint=False)
+    seg_cfg = load_config(args.seg_config or Path(args.checkpoint).with_name("config.yaml"))
+    model = build_segmentation_model(seg_cfg["model"], in_channels=len(seg_cfg["data"].get("modalities", ["T2"])))
     load_weights(model, args.checkpoint, min_fraction=1.0)
+    LOG.info("Backbone %s from %s", seg_cfg["model"]["name"], args.checkpoint)
 
     df = extract_deep_features(model, loader, device, args.stages, mask_source=args.mask_source)
     path = out_dir / f"deep_features_{args.mask_source}.csv"

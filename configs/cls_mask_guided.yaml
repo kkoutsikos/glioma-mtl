@@ -28,9 +28,18 @@ data:
 
 model:
   in_channels: 1
+  # Encoder of the shared segmentation backbone (configs/paper.yaml: classification.backbone). SegMamba
+  # needs the CUDA build from the notebook's SegMamba cell. For a SwinUNETR backbone set
+  # backbone: swin_unetr (feature_size / use_checkpoint below then apply).
+  backbone: segmamba
+  backbone_cfg:                    # must match configs/seg_segmamba.yaml
+    segmamba_repo: third_party/SegMamba
+    depths: [2, 2, 2, 2]
+    feat_size: [48, 96, 192, 384]
+    hidden_size: 768
   feature_size: 48
   use_checkpoint: true
-  backbone_checkpoint: runs/seg_swin_unetr_ssl/best.pt   # segmentation model trained on the shared split
+  backbone_checkpoint: runs/seg_segmamba_lr5e5_s42/best.pt   # segmentation model trained on the shared split
   freeze_backbone: false
   encoder_stages: [4]              # 0..4; [2, 3, 4] = thesis multi-scale variant
   use_decoder_token: true
