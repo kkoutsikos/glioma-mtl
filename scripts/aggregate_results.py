@@ -4,7 +4,8 @@
 
 * Segmentation: mean ± SD of the per-seed test means; 95% bootstrap CI over patients (seed-averaged);
   paired Wilcoxon of every model vs. the best one (Holm-corrected); parameters, training time, peak GPU
-  memory, inference time per case and the GPU used.
+  memory, inference time per case and the GPU used. "~" marks a training time partly reconstructed from
+  log.txt timestamps (epochs trained before cost logging existed).
 * Classification: mean ± SD over seeds, plus the seed ensemble (averaged probabilities) with a 95%
   bootstrap CI over the 25 test patients.
 * K-fold late fusion: mean ± SD over the CV folds, and the one-shot hold-out result with its CI.
@@ -22,7 +23,10 @@ import yaml
 
 from glioma_mtl.data.metadata import TASKS
 from glioma_mtl.engine import task_arrays
+from glioma_mtl.engine.common import count_parameters
 from glioma_mtl.evaluation import bootstrap_ci, classification_metrics, paired_wilcoxon
+from glioma_mtl.models.segmentation import build_segmentation_model
+from glioma_mtl.utils import read_history
 
 SEG_METRICS = ["dice", "hd95", "nsd", "iou", "sensitivity", "precision"]
 CLS_METRICS = ["accuracy", "balanced_accuracy", "macro_f1", "macro_auc"]
@@ -67,18 +71,46 @@ def save(df: pd.DataFrame, out: Path, name: str, caption: str) -> str:
     return f"## {caption}\n\n{to_markdown(df)}\n"
 
 
+def train_seconds(h: pd.DataFrame) -> tuple[pd.Series, bool]:
+    """Wall time per epoch, and whether any of it is estimated.
+
+    Epochs trained before cost logging existed have no ``epoch_seconds``. They take the log.txt interval
+    to the previous epoch, or, for the first epoch of a session, the mean of the same kind of epoch (with or
+    without validation).
+    """
+    secs = h["epoch_seconds"] if "epoch_seconds" in h else pd.Series(np.nan, index=h.index)
+    estimated = bool(secs.isna().any())
+    if "log_seconds" in h:
+        secs = secs.fillna(h["log_seconds"])
+    validated = h.filter(like="val_").notna().any(axis=1)
+    return secs.fillna(secs.groupby(validated).transform("mean")).fillna(secs.mean()), estimated
+
+
+def seg_params(run_dir: Path) -> float | None:
+    """Parameter count (millions) from the run's saved config, for runs trained before model_info.json."""
+    try:
+        cfg = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
+        model = build_segmentation_model(cfg["model"], in_channels=len(cfg["data"].get("modalities", ["T2"])))
+        return count_parameters(model)["params"] / 1e6
+    except Exception as e:  # e.g. SegMamba needs its CUDA extension
+        print(f"[seg] no parameter count for {run_dir.name}: {e}")
+        return None
+
+
 def run_cost(run_dir: Path) -> dict:
-    """Parameters, training time, peak GPU memory and GPU of one run, from model_info.json + history.csv."""
+    """Parameters, training time, peak GPU memory and GPU of one segmentation run, from model_info.json + history."""
     out: dict = {}
     info = run_dir / "model_info.json"
     if info.exists():
         d = json.loads(info.read_text(encoding="utf-8"))
         out["params_M"], out["gpu"] = d["params"] / 1e6, d.get("gpu")
-    hist = run_dir / "history.csv"
-    if hist.exists():
-        h = pd.read_csv(hist)
-        if "epoch_seconds" in h:
-            out["train_h"] = h["epoch_seconds"].sum() / 3600
+    elif (run_dir / "config.yaml").exists():
+        out["params_M"] = seg_params(run_dir)
+    h = read_history(run_dir)
+    if "epoch" in h:
+        secs, estimated = train_seconds(h)
+        if secs.notna().any():
+            out["train_h"], out["train_h_estimated"] = secs.sum() / 3600, estimated
         if "peak_mem_gb" in h:
             out["peak_mem_gb"] = h["peak_mem_gb"].max()
         if "gpu" in h:  # several names = the run resumed on another GPU type, so train_h mixes speeds
@@ -129,7 +161,9 @@ def segmentation_table(plan: dict, root: Path) -> tuple[pd.DataFrame, pd.DataFra
         # Compute cost: mean over seeds; inference = median whole-volume sliding-window seconds per case
         cost = pd.DataFrame(costs[model])
         for col, digits in (("params_M", 1), ("train_h", 1), ("peak_mem_gb", 1)):
-            row[col] = fmt(cost[col].mean(), digits=digits) if col in cost else "–"
+            row[col] = fmt(cost[col].astype(float).mean(), digits=digits) if col in cost else "–"
+        if "train_h_estimated" in cost and cost["train_h_estimated"].eq(True).any() and row["train_h"] != "–":
+            row["train_h"] = "~" + row["train_h"]  # partly reconstructed from log.txt timestamps
         seconds = pd.concat(frames)["seconds"] if all("seconds" in f for f in frames) else pd.Series(dtype=float)
         row["infer_s_per_case"] = fmt(seconds.median(), digits=2) if len(seconds) else "–"
         row["gpu"] = " + ".join(sorted(cost["gpu"].dropna().unique())) if "gpu" in cost else "–"
@@ -198,7 +232,8 @@ def main() -> None:
     if seg is not None:
         seg[1].to_csv(out / "segmentation_per_patient_seed_avg.csv", index=False)
         sections.append(save(seg[0], out, "segmentation", "Segmentation on the test split (mean ± SD over seeds "
-                                                           "[95% bootstrap CI]; Wilcoxon vs best, Holm-corrected)"))
+                                                           "[95% bootstrap CI]; Wilcoxon vs best, Holm-corrected; "
+                                                           "~ = training time partly estimated from log timestamps)"))
     cls = classification_table(plan, root)
     if cls is not None:
         sections.append(save(cls, out, "classification", "Classification on the held-out test split "

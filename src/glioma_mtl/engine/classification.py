@@ -14,7 +14,7 @@ from tqdm import tqdm
 from ..losses import MultiTaskLoss
 from ..models.classification import MultiTaskGliomaNet
 from ..utils import LOG, CSVLogger, format_row, save_checkpoint
-from .common import AmpStepper, BestTracker, make_optimizer, make_scheduler, save_last, try_resume
+from .common import AmpStepper, BestTracker, EpochCost, make_optimizer, make_scheduler, save_last, try_resume
 
 
 def _inputs(batch: Mapping, model: MultiTaskGliomaNet, device: torch.device, mask_key: str):

@@ -27,11 +27,13 @@ from sklearn.metrics import confusion_matrix
 from glioma_mtl import plotting
 from glioma_mtl.data.metadata import TASKS
 from glioma_mtl.engine import task_arrays
+from glioma_mtl.utils import read_history
 
 
 def training_curves(root: Path, out: Path) -> None:
-    for history in sorted(root.glob("*/history.csv")):
-        plotting.plot_history(history, out / "curves" / f"{history.parent.name}.png", history.parent.name)
+    for history in sorted(root.glob("*/history.csv")):  # completed from log.txt for runs that predate the logger fix
+        run = history.parent
+        plotting.plot_history(read_history(run), out / "curves" / f"{run.name}.png", run.name)
 
 
 def segmentation_figures(plan: dict, root: Path, out: Path) -> dict[str, pd.DataFrame]:

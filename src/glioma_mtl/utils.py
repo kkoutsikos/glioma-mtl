@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 import random
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 import torch
+import pandas as pd  # after torch (see src/glioma_mtl/__init__.py)
 
 LOG = logging.getLogger("glioma_mtl")
 
@@ -42,13 +46,21 @@ def get_device(preference: str = "auto") -> torch.device:
 def save_checkpoint(path: str | Path, model: torch.nn.Module, **extra: Any) -> None:
     """Save ``model_state`` plus any extra objects (optimizer, scheduler, scaler, epoch, metrics, config).
 
-    Objects with a ``state_dict`` method are stored via their state dict.
+    Objects with a ``state_dict`` method are stored via their state dict. The file is written next to its
+    target and then renamed over it, so a session that dies mid-write leaves the previous checkpoint intact.
     """
     state: dict[str, Any] = {"model_state": model.state_dict()}
     for key, value in extra.items():
         state[key] = value.state_dict() if hasattr(value, "state_dict") else value
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(state, path)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(state, tmp)
+    try:
+        os.replace(tmp, path)
+    except OSError:  # some network file systems refuse to rename over an existing file
+        path.unlink(missing_ok=True)
+        os.replace(tmp, path)
 
 
 def _looks_like_state_dict(obj: Any) -> bool:
@@ -127,3 +139,59 @@ class CSVLogger:
         else:
             with open(self.path, "a", newline="", encoding="utf-8") as f:
                 csv.DictWriter(f, fieldnames=fields).writerow(row)
+
+
+_LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) \w+ (.*)$")
+
+
+def _value(text: str) -> Any:
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+
+def _logged_epochs(path: Path) -> pd.DataFrame:
+    """The ``format_row`` epoch lines of a log.txt, plus ``log_seconds``: the time since the previous epoch line
+    of the same session (training, validation and checkpointing). NaN for the first epoch of each session."""
+    if not path.exists():
+        return pd.DataFrame()
+    rows, prev = [], None
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = _LOG_LINE.match(line)
+        if not match:
+            continue
+        stamp, message = match.groups()
+        if not message.startswith("epoch="):
+            if message.startswith(("Run ", "Resumed from")):  # a new session: its first epoch has no interval
+                prev = None
+            continue
+        row = {key: _value(value) for key, _, value in (part.partition("=") for part in message.split(" | "))}
+        t = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S,%f")
+        if prev is not None and row["epoch"] == prev[0] + 1:
+            row["log_seconds"] = (t - prev[1]).total_seconds()
+        prev = (row["epoch"], t)
+        rows.append(row)
+    return pd.DataFrame(rows).drop_duplicates("epoch", keep="last") if rows else pd.DataFrame()
+
+
+def read_history(run_dir: str | Path) -> pd.DataFrame:
+    """A run's per-epoch history: ``history.csv`` completed from the epoch lines of ``log.txt``.
+
+    Runs started before the CSV logger kept columns that appear after epoch 1 lost their validation metrics
+    from history.csv, and runs started before cost logging have no ``epoch_seconds``. log.txt has every
+    epoch line with a timestamp, so those cells are filled from it (the CSV wins where both have a value).
+    """
+    run_dir = Path(run_dir)
+    csv_path = run_dir / "history.csv"
+    hist = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
+    logged = _logged_epochs(run_dir / "log.txt")
+    if logged.empty or "epoch" not in hist:
+        return hist if "epoch" in hist else logged
+    hist = hist.drop_duplicates("epoch", keep="last")
+    columns = [*hist.columns, *(c for c in logged.columns if c not in hist.columns)]
+    merged = hist.set_index("epoch").combine_first(logged.set_index("epoch")).reset_index()
+    return merged[columns].sort_values("epoch", ignore_index=True)

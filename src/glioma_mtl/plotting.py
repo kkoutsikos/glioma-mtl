@@ -29,9 +29,9 @@ def _save(fig: Figure, path: str | Path) -> Path:
     return path
 
 
-def plot_history(csv_path: str | Path, out: str | Path, title: str | None = None) -> Path | None:
-    """Loss curves (left) and validation metrics (right) from a run's history.csv."""
-    df = pd.read_csv(csv_path)
+def plot_history(history: pd.DataFrame | str | Path, out: str | Path, title: str | None = None) -> Path | None:
+    """Loss curves (left) and validation metrics (right) from a run's history (``utils.read_history`` or a CSV)."""
+    df = history if isinstance(history, pd.DataFrame) else pd.read_csv(history)
     if df.empty or "epoch" not in df:
         return None
     losses = [c for c in ("train_loss", "train_total", "val_loss", "val_total") if c in df]

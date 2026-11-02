@@ -141,7 +141,11 @@ def try_resume(path: str | Path, model, optimizer, scheduler, stepper: AmpSteppe
     path = Path(path)
     if not enabled or not path.exists():
         return 0
-    state = torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as err:  # truncated by a session that died mid-write (before saves were atomic)
+        raise RuntimeError(f"{path} is incomplete or damaged and cannot be resumed. Delete its run folder "
+                           f"{path.parent} to start this run from scratch.\n{err}") from err
     if "optimizer" not in state:
         LOG.warning("%s has no optimizer state; starting from scratch", path)
         return 0
