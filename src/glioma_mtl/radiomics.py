@@ -3,7 +3,8 @@
 The thesis selected features with RFE/LASSO on all 162 patients *before* splitting, so the test
 labels influenced which features were kept. Here every scaler/selector is fit on training data only:
 :class:`RadiomicsFeaturizer` for the deep model's radiomics token, :func:`tabular_pipeline` inside
-cross-validation for the tabular baselines.
+cross-validation for the tabular baselines. The selector is the thesis' RFE with a random forest
+(:class:`RFETopK`) or a univariate ANOVA ranking (:class:`TopK`), see :func:`make_selector`.
 """
 from __future__ import annotations
 
@@ -14,7 +15,8 @@ from typing import Iterable, Mapping
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.feature_selection import VarianceThreshold, f_classif
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import RFE, VarianceThreshold, f_classif
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -45,6 +47,31 @@ class TopK(BaseEstimator, TransformerMixin):
         names = np.asarray(input_features if input_features is not None
                            else [f"x{i}" for i in range(int(self.support_.max()) + 1)], dtype=object)
         return names[self.support_]
+
+
+class RFETopK(TopK):
+    """Keep ``k`` features by recursive feature elimination with a random forest, as the thesis did (there on
+    all patients before splitting; here refit on each training set). Each round drops the ``step`` fraction
+    of the starting features with the lowest impurity importance (the thesis dropped one per round)."""
+
+    def __init__(self, k: int = 30, step: float = 0.1, n_estimators: int = 50):
+        self.k, self.step, self.n_estimators = k, step, n_estimators
+
+    def fit(self, X, y):
+        X = np.asarray(X)
+        forest = RandomForestClassifier(n_estimators=self.n_estimators, class_weight="balanced", random_state=0,
+                                        n_jobs=-1)
+        rfe = RFE(forest, n_features_to_select=min(self.k, X.shape[1]), step=self.step).fit(X, y)
+        self.support_ = np.flatnonzero(rfe.support_)
+        return self
+
+
+def make_selector(method: str, k: int) -> TopK:
+    if method == "rfe":
+        return RFETopK(k)
+    if method == "anova":
+        return TopK(k)
+    raise ValueError(f"radiomics selection must be 'rfe' or 'anova', got {method!r}")
 
 # Settings used in the thesis (T2, intensity-normalised, 1 mm, bin width 5).
 DEFAULT_SETTINGS = {
@@ -102,9 +129,11 @@ def load_radiomics(path: str | Path) -> pd.DataFrame:
 
 @dataclass
 class RadiomicsFeaturizer:
-    """Impute -> drop constants -> standardise -> keep the ``k`` best by ANOVA F on *training* labels."""
+    """Impute -> drop constants -> standardise -> keep ``k`` features chosen on *training* labels
+    (``method``: ``rfe`` or ``anova``, see :func:`make_selector`)."""
 
     k: int | None = 30
+    method: str = "anova"
     pipeline: Pipeline | None = None
     columns: list[str] = field(default_factory=list)
 
@@ -114,7 +143,7 @@ class RadiomicsFeaturizer:
         if self.k:
             if y is None:
                 raise ValueError("feature selection needs training labels")
-            steps.append(("select", TopK(self.k)))
+            steps.append(("select", make_selector(self.method, self.k)))
         self.columns = list(X.columns)
         keep = y >= 0 if y is not None else slice(None)
         self.pipeline = Pipeline(steps).fit(X.values[keep], None if y is None else y[keep])

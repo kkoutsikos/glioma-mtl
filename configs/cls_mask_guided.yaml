@@ -14,7 +14,8 @@ clinical:
 
 radiomics:
   csv: null                        # output of scripts/extract_radiomics.py
-  k: 30                            # SelectKBest fitted on the training split only
+  k: 30                            # features kept, chosen on the training split only
+  select: rfe                      # rfe (random forest, as in the thesis) | anova (univariate F-test)
   select_task: grade
 
 data:

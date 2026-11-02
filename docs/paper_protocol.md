@@ -20,7 +20,7 @@ trained on splits that contained the classification test patients.
 | Different, overlapping splits for SSL / segmentation / classification | one split file; classification test ⊂ segmentation test; never used for SSL or segmentation training | `scripts/make_splits.py`, `validate_splits` |
 | Trinity: all image tokens were zero tensors | hook-free feature extraction, channel counts derived and checked | `models/backbone.py`, `models/classification.py` |
 | Multi-scale model: backbone checkpoint silently not loaded | `load_weights` raises below 90% matched parameters | `utils.load_weights` |
-| Radiomics selection fit on all patients before splitting | selection / scaling inside each training fold | `radiomics.TopK`, `scripts/kfold_cv.py` |
+| Radiomics selection fit on all patients before splitting | the thesis' RFE with a random forest (30 features) kept, but fit with the scaling inside each training fold, and on the training split only for the deep models' radiomics token | `radiomics.RFETopK`, `scripts/kfold_cv.py` |
 | XGBoost on embeddings from a network trained on the same patients' labels | features from the segmentation backbone (no class labels), repeated k-fold CV + one-shot hold-out | `features.py`, `scripts/kfold_cv.py` |
 | Segmentation leaderboard first computed on the validation set | test split only, per-case CSV, bootstrap CI, Wilcoxon + Holm | `scripts/evaluate_segmentation.py`, `scripts/aggregate_results.py` |
 | Image/mask pairing by sorted file order; follow-up scans | pairing by patient ID; follow-ups excluded | `data/files.py`, `data/metadata.py` |
@@ -53,6 +53,10 @@ These further changes are improvements rather than error fixes. State them in th
   Cascade keeps its backbone frozen throughout.
 
 These three classifier settings were fixed in a code review before any classifier had been trained.
+The radiomics selector was switched at the same time from a univariate ANOVA top-30 to the thesis' RFE
+(random forest, 50 trees, 10% of the features dropped per round, 30 kept), before any k-fold or classifier
+result existed. Report RFE only; do not also run ANOVA and keep the better one. Deep features keep the
+ANOVA top-32, because RFE on ~1,400 features would be slow and unstable.
 
 ## 2. Experiment matrix
 
@@ -132,7 +136,7 @@ Estimated from your thesis Colab logs (T4, 15 GB). An A100 or L4 is roughly 2–
 | Predicted masks + features | ~0.5 h | 1 | ~0.5 h |
 | Classifier, 100 epochs (patience 25 often stops earlier) | ~2–4.5 h | 9 experiments × 1 seed (default) / × 3 seeds | ~18–40 h / ~55–120 h |
 | Explanations (Grad-CAM per test patient) | ~10–20 min | 8 | ~2 h |
-| k-fold CV (CPU, with MLP) | ~0.5–1 h | 1 | ~1 h |
+| k-fold CV (CPU, with MLP and radiomics RFE) | ~0.5–1 h | 1 | ~1 h |
 
 With the default single seed, roughly 85–130 T4-hours in total (about 45–65 on an L4, 25–40 on an
 A100). Going to 3 classifier seeds adds about 35–65 T4-hours, for roughly 130–200 in total. With this many runs an L4 or A100

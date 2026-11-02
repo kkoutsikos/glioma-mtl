@@ -5,8 +5,9 @@
         radiomics.csv=runs/radiomics/radiomics_pred.csv --holdout
 
 Feature blocks: clinical groups (demographics, ...), radiomics, and label-free deep features from the
-segmentation backbone (``scripts/extract_deep_features.py``). Every imputer / scaler / ``SelectKBest``
-sits inside the pipeline, so it is refit on each training fold.
+segmentation backbone (``scripts/extract_deep_features.py``). Every imputer / scaler / feature selector
+(radiomics: RFE with a random forest or ANOVA, ``radiomics.select``; deep features: ANOVA) sits inside the
+pipeline, so it is refit on each training fold.
 
 ``--holdout`` also fits each pipeline once on classification train+val and evaluates it on the
 classification test split, which no model in the pipeline has seen. Feature sets marked
@@ -16,10 +17,13 @@ from __future__ import annotations
 
 import torch  # noqa: F401  (load before pandas; see src/glioma_mtl/__init__.py)
 import argparse
+import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from joblib import Memory
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
@@ -37,7 +41,7 @@ from glioma_mtl.data import load_metadata, load_splits
 from glioma_mtl.data.metadata import TASKS, clinical_transformer_parts, feature_columns, normalize_patient_id
 from glioma_mtl.evaluation import classification_metrics
 from glioma_mtl.features import load_deep_features
-from glioma_mtl.radiomics import TopK, load_radiomics
+from glioma_mtl.radiomics import TopK, load_radiomics, make_selector
 
 # name -> (clinical groups, radiomics?, deep?)
 def feature_sets(clinical: list[str]) -> dict[str, tuple[list[str], bool, bool]]:
@@ -93,18 +97,20 @@ def make_models(cfg: dict) -> dict:
     return {k: v for k, v in models.items() if wanted is None or k in wanted or k == "majority"}
 
 
-def _block(cols: list[str], k: int) -> Pipeline:
+def _block(selector: TopK) -> Pipeline:
     return Pipeline([("impute", SimpleImputer(strategy="median")), ("var", VarianceThreshold()),
-                     ("scale", StandardScaler()), ("select", TopK(k))])
+                     ("scale", StandardScaler()), ("select", selector)])
 
 
-def build_pipeline(groups, rad_cols, deep_cols, k_rad, k_deep, model) -> Pipeline:
+def build_pipeline(groups, rad_cols, deep_cols, k_rad, k_deep, model, rad_select: str = "anova",
+                   memory: Memory | None = None) -> Pipeline:
+    """``memory`` caches the fitted feature step, so the classifiers of one fold share one feature selection."""
     parts = clinical_transformer_parts(groups) if groups else []
     if rad_cols:
-        parts.append(("rad", _block(rad_cols, k_rad), rad_cols))
+        parts.append(("rad", _block(make_selector(rad_select, k_rad)), rad_cols))
     if deep_cols:
-        parts.append(("deep", _block(deep_cols, k_deep), deep_cols))
-    return Pipeline([("features", ColumnTransformer(parts)), ("clf", model)])
+        parts.append(("deep", _block(TopK(k_deep)), deep_cols))
+    return Pipeline([("features", ColumnTransformer(parts)), ("clf", model)], memory=memory)
 
 
 GROUPS = {"num": "clinical", "cat": "clinical", "rad": "radiomics", "deep": "deep"}
@@ -153,6 +159,8 @@ def main() -> None:
             blocks[name] = list(extra.columns)
     k_rad = (cfg.get("radiomics") or {}).get("k", 30)
     k_deep = (cfg.get("deep_features") or {}).get("k", 32)
+    rad_select = (cfg.get("radiomics") or {}).get("select", "anova")
+    memory = Memory(tempfile.mkdtemp(prefix="kfold_features_"), verbose=0)
     print(f"Cohort: {len(df)} patients | radiomics: {len(blocks['rad'])} | deep: {len(blocks['deep'])} features")
 
     models = make_models(cv_cfg)
@@ -182,8 +190,9 @@ def main() -> None:
                 label = "-" if model_name == "majority" else fs_name
                 fit_params = ({"clf__sample_weight": compute_sample_weight("balanced", y)}
                               if model_name == "xgboost" else None)
-                res = cross_validate(build_pipeline(groups, rad, deep, k_rad, k_deep, make_model()), X, y, cv=cv,
-                                     scoring=SCORING, fit_params=fit_params, error_score=np.nan)
+                pipeline = build_pipeline(groups, rad, deep, k_rad, k_deep, make_model(), rad_select, memory)
+                res = cross_validate(pipeline, X, y, cv=cv, scoring=SCORING, fit_params=fit_params,
+                                     error_score=np.nan)
                 for metric in SCORING:
                     vals = res[f"test_{metric}"]
                     cv_rows.append({"task": task, "features": label, "model": model_name, "metric": metric,
@@ -196,7 +205,7 @@ def main() -> None:
                     train_ids = [p for p in splits["classification"]["train"] + splits["classification"]["val"] if p in sub.index]
                     test_ids = [p for p in splits["classification"]["test"] if p in sub.index]
                     y_tr = sub.loc[train_ids, label_col].to_numpy()
-                    pipe = build_pipeline(groups, rad, deep, k_rad, k_deep, make_model())
+                    pipe = build_pipeline(groups, rad, deep, k_rad, k_deep, make_model(), rad_select, memory)
                     kw = {"clf__sample_weight": compute_sample_weight("balanced", y_tr)} if model_name == "xgboost" else {}
                     pipe.fit(X.loc[train_ids], y_tr, **kw)
                     proba = np.zeros((len(test_ids), len(classes)))
@@ -213,6 +222,7 @@ def main() -> None:
                                              "value": r["value"], "ci_low": r["ci_low"], "ci_high": r["ci_high"],
                                              "n": int(r["n"])})
 
+    shutil.rmtree(memory.location, ignore_errors=True)
     cv_df = pd.DataFrame(cv_rows)
     cv_df.to_csv(out_dir / "cv_results.csv", index=False)
     wide = cv_df.assign(v=cv_df["mean"].map("{:.3f}".format) + " ± " + cv_df["sd"].map("{:.3f}".format)).pivot_table(

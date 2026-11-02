@@ -74,7 +74,7 @@ def classification_data(cfg: Mapping, ctx: Context, featurizers: Mapping | None 
         radiomics = load_radiomics(rad_cfg["csv"])
         if "radiomics" not in featurizers:
             label_col = TASKS[rad_cfg.get("select_task", tasks[0])][0]
-            featurizers["radiomics"] = RadiomicsFeaturizer(rad_cfg.get("k", 30)).fit(
+            featurizers["radiomics"] = RadiomicsFeaturizer(rad_cfg.get("k", 30), rad_cfg.get("select", "anova")).fit(
                 radiomics.loc[split["train"]], train[label_col].to_numpy())
 
     pred_dir = cfg["data"].get("pred_mask_dir") if cfg["data"].get("crop_mask_key") == "pred_mask" else None

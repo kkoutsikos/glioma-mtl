@@ -11,10 +11,11 @@ clinical:
 
 radiomics:
   csv: null          # runs/radiomics/radiomics_pred.csv (predicted masks) or radiomics_label.csv (oracle)
-  k: 30              # SelectKBest per training fold
+  k: 30              # features kept, chosen per training fold
+  select: rfe        # rfe (random forest, as in the thesis) | anova (univariate F-test)
 deep_features:
   csv: null          # runs/deep_features/deep_features_pred.csv (scripts/extract_deep_features.py)
-  k: 32              # SelectKBest per training fold (raw dim = 192 + 384 + 768 + 48)
+  k: 32              # ANOVA top-k per training fold (raw dim = 192 + 384 + 768 + 48)
 
 cv:
   folds: 5

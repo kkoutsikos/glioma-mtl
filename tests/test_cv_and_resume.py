@@ -7,8 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import VarianceThreshold
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
 
 from glioma_mtl.engine import predict, score, train_classifier, train_segmentation
 from glioma_mtl.engine.classification import FLIPS
@@ -17,7 +18,7 @@ from glioma_mtl.features import extract_deep_features
 from glioma_mtl.losses import MultiTaskLoss
 from glioma_mtl.models import MultiTaskGliomaNet, build_swin_unetr
 from glioma_mtl.models.segmentation import build_segmentation_model
-from glioma_mtl.radiomics import TopK
+from glioma_mtl.radiomics import RadiomicsFeaturizer, RFETopK, TopK, make_selector
 from glioma_mtl.utils import CSVLogger, read_history, save_checkpoint
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -38,6 +39,28 @@ def test_topk_survives_dropped_columns_and_picks_informative():
     pipe = Pipeline([("var", VarianceThreshold()), ("top", TopK(k=30))]).fit(X, y)
     assert pipe.transform(X).shape == (40, 4)                      # k clamped to the 4 non-constant columns
     assert TopK(k=1).fit(X, y).support_.tolist() == [3]
+
+
+def test_rfe_keeps_informative_radiomics_on_training_labels_only(tmp_path):
+    from joblib import Memory
+
+    rng = np.random.default_rng(0)
+    y = np.repeat([0, 1, 2], 20)
+    X = np.c_[rng.normal(size=(60, 20)), y + rng.normal(scale=0.3, size=60), (y == 2) + rng.normal(scale=0.3, size=60)]
+    rfe = RFETopK(k=2).fit(X, y)
+    assert rfe.support_.tolist() == [20, 21] and rfe.transform(X).shape == (60, 2)
+    assert RFETopK(k=50).fit(X[:, :5], y).support_.tolist() == [0, 1, 2, 3, 4]   # k clamped
+    assert isinstance(make_selector("rfe", 3), RFETopK) and type(make_selector("anova", 3)) is TopK
+
+    cols = [f"original_f{i}" for i in range(X.shape[1])]
+    feat = RadiomicsFeaturizer(k=2, method="rfe").fit(pd.DataFrame(X, columns=cols), y)
+    assert feat.dim == 2
+
+    kfold = _load_script("kfold_cv")
+    df = pd.DataFrame(X, columns=cols)
+    pipe = kfold.build_pipeline([], cols, [], 2, 32, LogisticRegression(), "rfe", Memory(tmp_path, verbose=0))
+    pipe.fit(df, y)
+    assert list(pipe[:-1].get_feature_names_out()) == ["rad__original_f20", "rad__original_f21"]
 
 
 def test_holm_correction():
