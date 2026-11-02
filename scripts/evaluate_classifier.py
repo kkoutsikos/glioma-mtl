@@ -42,7 +42,8 @@ def main() -> None:
     load_weights(model, args.checkpoint, min_fraction=1.0)
     model.to(device)
 
-    preds, _ = predict(model, loader, device, mask_key=d.get("model_mask_key", "label"))
+    preds, _ = predict(model, loader, device, mask_key=d.get("model_mask_key", "label"),
+                       tta=cfg.get("inference", {}).get("tta_flips", False))
     preds = add_derived_lgg_hgg(preds)  # LGG vs HGG from the grade head unless the model has its own head
     preds.to_csv(out_dir / f"predictions_{args.split}.csv", index=False)
     tables = []

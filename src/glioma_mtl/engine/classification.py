@@ -28,26 +28,38 @@ def _targets(batch: Mapping, model: MultiTaskGliomaNet, device: torch.device) ->
     return {t: torch.as_tensor(batch[f"y_{t}"]).long().to(device) for t in model.tasks}
 
 
+# Every combination of flips of the three spatial axes of [B, C, D, H, W]; training flips each axis at random.
+FLIPS = [(), (2,), (3,), (4,), (2, 3), (2, 4), (3, 4), (2, 3, 4)]
+
+
 @torch.no_grad()
 def predict(model: MultiTaskGliomaNet, loader, device: torch.device, loss_fn: MultiTaskLoss | None = None,
-            mask_key: str = "label", amp: bool = True) -> tuple[pd.DataFrame, float]:
-    """One row per sample: ``patient_id``, ``y_<task>`` and ``p_<task>_<k>`` columns; plus mean loss."""
+            mask_key: str = "label", amp: bool = True, tta: bool = False) -> tuple[pd.DataFrame, float]:
+    """One row per sample: ``patient_id``, ``y_<task>`` and ``p_<task>_<k>`` columns; plus mean loss.
+
+    ``tta`` averages the class probabilities over the 8 flipped copies of each crop; the loss is that of
+    the unflipped crop.
+    """
     model.eval()
     rows, losses = [], []
     for batch in loader:
         image, tabular, mask = _inputs(batch, model, device, mask_key)
         targets = _targets(batch, model, device)
-        with torch.autocast(device.type, enabled=amp and device.type == "cuda"):
-            out = model(image, tabular, mask)
-        if loss_fn is not None:
-            seg = batch["label"].to(device) if "label" in batch else None
-            losses.append(loss_fn(out, targets, seg)[0].item())
+        probs: dict[str, torch.Tensor] = defaultdict(float)
+        for dims in FLIPS if tta else FLIPS[:1]:
+            flip = (lambda x: x.flip(dims)) if dims else (lambda x: x)
+            with torch.autocast(device.type, enabled=amp and device.type == "cuda"):
+                out = model(flip(image), tabular, None if mask is None else flip(mask))
+            if not dims and loss_fn is not None:
+                seg = batch["label"].to(device) if "label" in batch else None
+                losses.append(loss_fn(out, targets, seg)[0].item())
+            for t, logits in out["logits"].items():
+                probs[t] = probs[t] + torch.softmax(logits.float(), 1) / (len(FLIPS) if tta else 1)
         for i in range(image.shape[0]):
             row = {"patient_id": batch["patient_id"][i]}
-            for t, logits in out["logits"].items():
+            for t, p in probs.items():
                 row[f"y_{t}"] = int(targets[t][i])
-                for k, p in enumerate(torch.softmax(logits[i].float(), 0).tolist()):
-                    row[f"p_{t}_{k}"] = p
+                row.update({f"p_{t}_{k}": v for k, v in enumerate(p[i].tolist())})
             rows.append(row)
     return pd.DataFrame(rows), float(np.mean(losses)) if losses else float("nan")
 
@@ -71,14 +83,21 @@ def task_arrays(df: pd.DataFrame, task: str) -> tuple[np.ndarray, np.ndarray]:
     return df[f"y_{task}"].to_numpy(), probs.to_numpy()
 
 
-def score(df: pd.DataFrame, tasks) -> dict[str, float]:
+def score(df: pd.DataFrame, tasks, weights: Mapping[str, float] | None = None) -> dict[str, float]:
+    """Macro-F1 and balanced accuracy per task, and ``cls_nll``: the task-weighted mean negative
+    log-likelihood of the true class, a smooth score of the classification heads alone (no
+    segmentation, auxiliary or contrastive terms), used to pick the checkpoint."""
     out = {}
+    weights = weights or {}
     for t in tasks:
         y, p = task_arrays(df, t)
         keep = y >= 0
         out[f"{t}_macro_f1"] = f1_score(y[keep], p[keep].argmax(1), average="macro", zero_division=0)
         out[f"{t}_bal_acc"] = balanced_accuracy_score(y[keep], p[keep].argmax(1))
+        out[f"{t}_nll"] = float(-np.log(np.clip(p[keep][np.arange(keep.sum()), y[keep]], 1e-7, 1.0)).mean())
     out["mean_macro_f1"] = float(np.mean([out[f"{t}_macro_f1"] for t in tasks]))
+    w = {t: weights.get(t, 1.0) for t in tasks}
+    out["cls_nll"] = sum(w[t] * out[f"{t}_nll"] for t in tasks) / sum(w.values())
     return out
 
 
@@ -102,16 +121,26 @@ def train_classifier(model: MultiTaskGliomaNet, train_loader, val_loader, loss_f
 
     sel = cfg.get("selection", {})
     sel_metric = sel.get("metric", "val_loss")
-    tracker = BestTracker("min" if sel_metric == "val_loss" else "max", sel.get("ema", 0.0), sel.get("patience"))
+    minimize = sel_metric.endswith(("loss", "nll"))
+    tracker = BestTracker("min" if minimize else "max", sel.get("ema", 0.0), sel.get("patience"))
+    tta = cfg.get("inference", {}).get("tta_flips", False)
     history = CSVLogger(out_dir / "history.csv")
     last = out_dir / "last.pt"
     start_epoch = try_resume(last, model, optimizer, scheduler, stepper, tracker, tcfg.get("resume", True))
     cost = EpochCost(model, device, out_dir)
+    # Heads first: the backbone stays frozen for the first epochs so that the randomly initialised heads'
+    # early gradients do not disturb the pretrained features, then everything is fine-tuned.
+    always_frozen = model.freeze_backbone
+    head_epochs = 0 if always_frozen else tcfg.get("freeze_backbone_epochs", 0)
 
     for epoch in range(start_epoch, epochs):
         if tracker.should_stop:
             LOG.info("Early stopping at epoch %d (best %d)", epoch + 1, tracker.best_epoch + 1)
             break
+        if head_epochs:
+            model.freeze_backbone = epoch < head_epochs
+            if epoch == head_epochs:
+                LOG.info("epoch %d: backbone unfrozen after %d head-only epochs", epoch + 1, head_epochs)
         cost.start()
         model.train()
         totals: dict[str, float] = defaultdict(float)
@@ -129,9 +158,9 @@ def train_classifier(model: MultiTaskGliomaNet, train_loader, val_loader, loss_f
         stepper.flush()
         scheduler.step()
 
-        val_df, val_loss = predict(model, val_loader, device, loss_fn, mask_key, tcfg.get("amp", True))
-        row = {"epoch": epoch + 1, **{f"train_{k}": v / max(n, 1) for k, v in totals.items()},
-               "val_loss": val_loss, **{f"val_{k}": v for k, v in score(val_df, model.tasks).items()}}
+        val_df, val_loss = predict(model, val_loader, device, loss_fn, mask_key, tcfg.get("amp", True), tta)
+        row = {"epoch": epoch + 1, **{f"train_{k}": v / max(n, 1) for k, v in totals.items()}, "val_loss": val_loss,
+               **{f"val_{k}": v for k, v in score(val_df, model.tasks, loss_fn.task_weights).items()}}
         value = row[sel_metric] if sel_metric in row else row[f"val_{sel_metric}"]
         if tracker.update(value, epoch):
             save_checkpoint(out_dir / "best.pt", model, epoch=epoch, metrics=row)
@@ -140,4 +169,5 @@ def train_classifier(model: MultiTaskGliomaNet, train_loader, val_loader, loss_f
         save_last(last, model, optimizer, scheduler, stepper, tracker, epoch, metrics=row)
         history.log(row)
         LOG.info(format_row(row))
+    model.freeze_backbone = always_frozen
     return out_dir / "best.pt"

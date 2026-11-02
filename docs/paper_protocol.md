@@ -43,7 +43,16 @@ These further changes are improvements rather than error fixes. State them in th
 - SSL gradient accumulation 4 instead of 16 (effective batch 8): about 2,150 instead of 540 optimizer
   updates over 50 epochs, at the same compute;
 - a stronger UNet configuration;
-- checkpoint selection on an EMA-smoothed validation loss.
+- classifier checkpoints selected on the EMA-smoothed validation NLL of the classification heads only
+  (`cls_nll`, task-weighted). The total validation loss would also include the segmentation, auxiliary and
+  contrastive terms, which differ between models, so the comparison would not select every model the same way;
+- classifier predictions on validation and test averaged over the 8 flips of the crop (training already
+  flips each axis at random); explanations use the unflipped crop;
+- the backbone stays frozen for the first 10 classifier epochs (heads only), then everything is fine-tuned,
+  so the randomly initialised heads' early gradients do not disturb the pretrained segmentation features.
+  Cascade keeps its backbone frozen throughout.
+
+These three classifier settings were fixed in a code review before any classifier had been trained.
 
 ## 2. Experiment matrix
 

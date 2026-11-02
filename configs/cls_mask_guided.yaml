@@ -66,10 +66,16 @@ train:
   lr_backbone: 1.0e-5
   weight_decay: 0.05
   warmup_epochs: 5
+  freeze_backbone_epochs: 10       # heads only first, then fine-tune everything (no effect if freeze_backbone)
   accumulation: 8
   amp: true
 
 selection:
-  metric: val_loss                 # val_loss | mean_macro_f1 | grade_macro_f1 | ...
-  ema: 0.6                         # smooth the noisy 24-patient validation curve before picking a checkpoint
+  # cls_nll = task-weighted NLL of the classification heads only, identical for every model. val_loss would
+  # also include the segmentation, auxiliary and contrastive terms (which differ between models).
+  metric: cls_nll                  # cls_nll | val_loss | mean_macro_f1 | grade_macro_f1 | ...
+  ema: 0.6                         # smooth the noisy 25-patient validation curve before picking a checkpoint
   patience: 25
+
+inference:
+  tta_flips: true                  # validation and test: average the probabilities over the 8 flips of the crop

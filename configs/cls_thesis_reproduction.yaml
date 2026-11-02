@@ -23,6 +23,12 @@ model:
   mask_mode: hard
   modality_dropout: 0.4
 
+train:
+  freeze_backbone_epochs: 0        # the thesis fine-tuned everything from the start
+
 selection:
   metric: mean_macro_f1
   ema: 0.0
+
+inference:
+  tta_flips: false

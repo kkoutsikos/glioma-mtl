@@ -10,7 +10,8 @@ import torch
 from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import VarianceThreshold
 
-from glioma_mtl.engine import train_classifier, train_segmentation
+from glioma_mtl.engine import predict, score, train_classifier, train_segmentation
+from glioma_mtl.engine.classification import FLIPS
 from glioma_mtl.engine.common import AmpStepper, BestTracker, make_optimizer, make_scheduler, save_last, try_resume
 from glioma_mtl.features import extract_deep_features
 from glioma_mtl.losses import MultiTaskLoss
@@ -113,6 +114,65 @@ def test_classifier_trains_and_logs_cost(tmp_path):
     df = pd.read_csv(tmp_path / "history.csv")
     assert df["epoch"].tolist() == [1, 2] and (df["epoch_seconds"] > 0).all() and df["val_loss"].notna().all()
     assert (tmp_path / "best.pt").exists() and (tmp_path / "model_info.json").exists()
+
+
+def _cls_batch():
+    label = torch.zeros(2, 1, 64, 64, 64)
+    label[..., 20:40, 20:40, 20:40] = 1
+    return {"image": torch.randn(2, 1, 64, 64, 64), "label": label, "patient_id": ["p1", "p2"],
+            "y_grade": torch.tensor([0, 2])}
+
+
+def test_checkpoint_score_is_classification_only_and_task_weighted():
+    df = pd.DataFrame({"patient_id": ["a", "b"], "y_grade": [0, 2], "p_grade_0": [0.8, 0.1], "p_grade_1": [0.1, 0.1],
+                       "p_grade_2": [0.1, 0.8], "y_diagnosis": [1, -1], "p_diagnosis_0": [0.5, 0.5],
+                       "p_diagnosis_1": [0.5, 0.5]})
+    s = score(df, ["grade", "diagnosis"], {"grade": 1.0, "diagnosis": 0.5})
+    assert np.isclose(s["grade_nll"], -np.log(0.8))
+    assert np.isclose(s["diagnosis_nll"], -np.log(0.5))                  # the missing label is skipped
+    assert np.isclose(s["cls_nll"], (-np.log(0.8) - 0.5 * np.log(0.5)) / 1.5)
+
+
+def test_classifier_picks_its_checkpoint_on_classification_nll(tmp_path):
+    model = MultiTaskGliomaNet({"grade": 3}, feature_size=12, use_checkpoint=False)
+    cfg = {"train": {"epochs": 2, "lr": 1e-3, "amp": False}, "data": {}, "selection": {"metric": "cls_nll"}}
+    train_classifier(model, [_cls_batch()], [_cls_batch()], MultiTaskLoss({"grade": 1.0}), cfg, tmp_path,
+                     torch.device("cpu"))
+    df = pd.read_csv(tmp_path / "history.csv")
+    best = torch.load(tmp_path / "best.pt", map_location="cpu", weights_only=False)
+    assert best["metrics"]["epoch"] == df.loc[df["val_cls_nll"].idxmin(), "epoch"]   # lower is better
+
+
+def test_flip_averaging_is_the_mean_over_all_flips():
+    torch.manual_seed(0)
+    model = MultiTaskGliomaNet({"grade": 3}, feature_size=12, use_checkpoint=False).eval()
+    batch = _cls_batch()
+    tta, _ = predict(model, [batch], torch.device("cpu"), tta=True)
+    plain, _ = predict(model, [batch], torch.device("cpu"))
+    with torch.no_grad():
+        mean = sum(torch.softmax(model(batch["image"].flip(d) if d else batch["image"])["logits"]["grade"], 1)
+                   for d in FLIPS) / len(FLIPS)
+    cols = ["p_grade_0", "p_grade_1", "p_grade_2"]
+    assert len(FLIPS) == 8 and np.allclose(tta[cols].to_numpy(), mean.numpy(), atol=1e-5)
+    assert not np.allclose(tta[cols].to_numpy(), plain[cols].to_numpy())
+
+
+def test_backbone_stays_frozen_for_the_first_epochs(tmp_path):
+    torch.manual_seed(0)
+    model = MultiTaskGliomaNet({"grade": 3}, feature_size=12, use_checkpoint=False)
+    cfg = {"train": {"epochs": 1, "lr": 1e-3, "lr_backbone": 1e-3, "amp": False, "warmup_epochs": 0,
+                     "freeze_backbone_epochs": 1}, "data": {}}
+    backbone0 = {k: v.clone() for k, v in model.backbone.state_dict().items()}
+    heads0 = [p.detach().clone() for p in model.head_parameters()]
+    train = lambda: train_classifier(model, [_cls_batch()], [_cls_batch()], MultiTaskLoss({"grade": 1.0}), cfg,
+                                     tmp_path, torch.device("cpu"))
+    train()
+    assert all(torch.equal(v, model.backbone.state_dict()[k]) for k, v in backbone0.items())
+    assert any(not torch.equal(a, b) for a, b in zip(heads0, model.head_parameters()))
+    cfg["train"]["epochs"] = 2                                    # resumes at epoch 2, where the backbone trains
+    train()
+    assert any(not torch.equal(v, model.backbone.state_dict()[k]) for k, v in backbone0.items())
+    assert model.freeze_backbone is False
 
 
 def test_save_checkpoint_survives_a_crash_mid_write(tmp_path, monkeypatch):

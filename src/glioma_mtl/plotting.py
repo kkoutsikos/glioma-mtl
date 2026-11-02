@@ -34,7 +34,7 @@ def plot_history(history: pd.DataFrame | str | Path, out: str | Path, title: str
     df = history if isinstance(history, pd.DataFrame) else pd.read_csv(history)
     if df.empty or "epoch" not in df:
         return None
-    losses = [c for c in ("train_loss", "train_total", "val_loss", "val_total") if c in df]
+    losses = [c for c in ("train_loss", "train_total", "val_loss", "val_total", "val_cls_nll") if c in df]
     metrics = [c for c in df if c.startswith("val_") and c not in losses
                and any(k in c for k in ("dice", "macro_f1", "bal_acc", "rot_acc"))]
     fig = Figure(figsize=(11, 4))
