@@ -67,7 +67,8 @@ def predict(model: MultiTaskGliomaNet, loader, device: torch.device, loss_fn: Mu
 def add_derived_lgg_hgg(df: pd.DataFrame) -> pd.DataFrame:
     """LGG (grade 2-3) vs HGG (grade 4) from the 3-way grade head, for models without a dedicated head.
 
-    P(HGG) = P(grade 4). Models trained with an ``lgg_hgg`` task keep their own head's output.
+    P(HGG) = P(grade 4), used for the AUC; the call is the grade head's own call (see ``task_calls``).
+    Models trained with an ``lgg_hgg`` task keep their own head's output.
     """
     if "y_grade" not in df or "y_lgg_hgg" in df:
         return df
@@ -75,12 +76,25 @@ def add_derived_lgg_hgg(df: pd.DataFrame) -> pd.DataFrame:
     out["y_lgg_hgg"] = np.where(out["y_grade"] >= 0, (out["y_grade"] == 2).astype(int), -1)
     out["p_lgg_hgg_0"] = out["p_grade_0"] + out["p_grade_1"]
     out["p_lgg_hgg_1"] = out["p_grade_2"]
+    out["lgg_hgg_from_grade"] = 1
     return out
 
 
 def task_arrays(df: pd.DataFrame, task: str) -> tuple[np.ndarray, np.ndarray]:
     probs = df[sorted((c for c in df if c.startswith(f"p_{task}_")), key=lambda c: int(c.rsplit("_", 1)[1]))]
     return df[f"y_{task}"].to_numpy(), probs.to_numpy()
+
+
+def task_calls(df: pd.DataFrame, task: str) -> np.ndarray:
+    """Predicted class per patient: the most probable one, except for LGG vs HGG derived from the grade head.
+
+    That one is HGG exactly when the grade call is grade 4. Grade 4 is about a third of the cohort, so a
+    cautious model rarely puts P(grade 4) above 0.5 and the most probable binary class would be LGG even for
+    patients the same model calls grade 4.
+    """
+    if task == "lgg_hgg" and "lgg_hgg_from_grade" in df:
+        return (task_arrays(df, "grade")[1].argmax(1) == 2).astype(int)
+    return task_arrays(df, task)[1].argmax(1)
 
 
 def score(df: pd.DataFrame, tasks, weights: Mapping[str, float] | None = None) -> dict[str, float]:

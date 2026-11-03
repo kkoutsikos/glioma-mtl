@@ -58,6 +58,17 @@ The radiomics selector was switched at the same time from a univariate ANOVA top
 result existed. Report RFE only; do not also run ANOVA and keep the better one. Deep features keep the
 ANOVA top-32, because RFE on ~1,400 features would be slow and unstable.
 
+**One scoring rule was changed after the first test evaluation; say so in the paper.** For models without
+their own LGG/HGG head (all but `cls_segmamba`), LGG vs HGG is derived from the grade head. Its call used to
+be the more probable of the two classes, so HGG only when P(grade 4) > 0.5. Image-only, multi-scale and
+Trinity then called all 25 test patients LGG, despite LGG/HGG AUCs of 0.89, 0.87 and 0.76. The same model
+could also call one patient both grade 4 and LGG. The call is now the grade head's own call: HGG exactly
+when it predicts grade 4. P(grade 4) is still the score for the AUC, so no AUC changed and nothing was
+retrained (only `cls_eval` reran). Report the LGG/HGG AUC as the primary metric. Put the first evaluation's
+balanced accuracies in the supplement, one seed, test split: image only 0.500, image + clinical 0.850,
++ radiomics 0.850, leaky reference 0.817, leaky reference + radiomics 0.850, cascade 0.767, multi-scale
+0.500, Trinity 0.500.
+
 ## 2. Experiment matrix
 
 **Definition of "clinical" used throughout:** everything known before surgery: age, sex, and whether a
@@ -177,7 +188,7 @@ sessions.
   radiomics). Present the leaky reference as "uses post-operative molecular / surgical data" and keep it
   out of the model comparison.
 - Use the test split once per final configuration, and choose nothing (epochs, thresholds, feature sets)
-  by looking at it.
+  by looking at it. The one exception, the derived LGG/HGG call, is disclosed in section 1.
 - Limitations to state: single centre; T2 only; 162-patient balanced cohort (339 grade-4 patients
   excluded); classification crops trained on ground-truth masks; segmentation backbone saw the
   classification train images and was chosen after the segmentation benchmark; small test set.

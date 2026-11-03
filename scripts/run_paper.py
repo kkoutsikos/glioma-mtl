@@ -11,7 +11,8 @@ marker: they rerun every time they are selected, so they always reflect the fini
 ``version`` reruns when its marker was written by an older version of that step. Its version names the
 masks (cleanup and the backbone that predicted them) and, for classifiers, the backbone, so switching
 ``classification.backbone`` reruns everything downstream. A classifier folder trained for another version
-is moved to ``<output_root>/.stale/`` instead of being resumed.
+is moved to ``<output_root>/.stale/`` instead of being resumed. Classifier evaluation also carries
+``EVAL_VERSION``, so a change in how test predictions are scored re-evaluates without retraining.
 
 Stages: splits, ssl, seg, predict, features, cls, kfold, aggregate.
 """
@@ -32,6 +33,8 @@ REPO = HERE.parent
 STAGES = ["splits", "ssl", "seg", "predict", "features", "cls", "explain", "kfold", "aggregate", "figures"]
 # Version of the predicted masks. Predicting and feature extraction rerun when their markers predate it.
 MASKS_VERSION = "largest-component"
+# Version of the classifier test evaluation. cls_eval reruns (the trained classifiers are kept) when it changes.
+EVAL_VERSION = "LGG/HGG call from the grade call"
 
 
 @dataclass
@@ -163,7 +166,7 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                                                              *sets([], ["data.crop_mask_key=pred_mask",
                                                                         f"data.pred_mask_dir={pred_dir}"])],
                                   optional=spec.get("optional", False), needs=[f"cls_train:{name}", "predict:test"],
-                                  version=trained))
+                                  version=f"{trained}, eval {EVAL_VERSION}"))
             first = f"{exp}_s{exp_seeds[0]}"
             run = (root / first).as_posix()
             steps.append(Step(f"explain:{first}", "explain", [

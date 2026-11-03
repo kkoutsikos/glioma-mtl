@@ -16,7 +16,7 @@ from glioma_mtl.cli import start_run
 from glioma_mtl.data.loaders import make_dataset, make_loader
 from glioma_mtl.data.metadata import TASKS
 from glioma_mtl.data.transforms import cls_eval_transforms
-from glioma_mtl.engine import add_derived_lgg_hgg, predict, task_arrays
+from glioma_mtl.engine import add_derived_lgg_hgg, predict, task_arrays, task_calls
 from glioma_mtl.evaluation import classification_metrics
 from glioma_mtl.experiment import build_classifier, classification_data, load_context
 from glioma_mtl.utils import LOG, load_weights
@@ -49,7 +49,8 @@ def main() -> None:
     tables = []
     for task in [c[2:] for c in preds.columns if c.startswith("y_")]:
         y, prob = task_arrays(preds, task)
-        table, cm = classification_metrics(y, prob, [str(c) for c in TASKS[task][1]], seed=cfg.get("seed", 0))
+        table, cm = classification_metrics(y, prob, [str(c) for c in TASKS[task][1]], seed=cfg.get("seed", 0),
+                                           pred=task_calls(preds, task))
         table.insert(0, "task", task)
         table.insert(1, "source", "head" if task in data.tasks else "derived from grade head")
         tables.append(table)

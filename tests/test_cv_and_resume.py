@@ -385,3 +385,21 @@ def test_switching_the_backbone_redoes_everything_downstream(tmp_path):
     (step.run_dir / ".step_version").write_text(step.version + "\n")
     runner.set_aside_stale_run(step, tmp_path, dry_run=False)
     assert step.run_dir.exists()
+
+
+def test_a_new_evaluation_version_re_evaluates_without_retraining(tmp_path):
+    """Classifier test metrics made by an older evaluation are redone; training and its run folder are kept."""
+    import yaml
+
+    runner = _load_script("run_paper")
+    plan = yaml.safe_load((runner.REPO / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    steps = {s.id: s for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]}
+    train, evaluate = steps["cls_train:cls_image_only_s42"], steps["cls_eval:cls_image_only_s42"]
+    assert evaluate.version == f"{train.version}, eval {runner.EVAL_VERSION}" and evaluate.run_dir is None
+    marker = tmp_path / "marker.done"
+    marker.write_text(f"Mon Nov  2 18:00:00 2026 (1.2 min)\nversion: {train.version}\n")   # written before EVAL_VERSION
+    assert runner.is_done(marker, train) and not runner.is_done(marker, evaluate)
+    train.run_dir.mkdir()
+    (train.run_dir / ".step_version").write_text(train.version + "\n")
+    runner.set_aside_stale_run(train, tmp_path, dry_run=False)
+    assert train.run_dir.exists()

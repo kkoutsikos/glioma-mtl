@@ -25,20 +25,28 @@ def macro_auc(y: np.ndarray, prob: np.ndarray) -> float:
 
 
 def classification_metrics(y: Sequence[int], prob: np.ndarray, class_names: Sequence, ci: bool = True,
-                           seed: int = 0) -> tuple[pd.DataFrame, np.ndarray]:
-    """Summary table (with 95% bootstrap CI) and confusion matrix. Rows with ``y == -1`` are dropped."""
+                           seed: int = 0, pred: Sequence[int] | None = None) -> tuple[pd.DataFrame, np.ndarray]:
+    """Summary table (with 95% bootstrap CI) and confusion matrix. Rows with ``y == -1`` are dropped.
+
+    ``pred`` are the predicted classes (default: the most probable one); AUC always uses ``prob``.
+    """
     y = np.asarray(y)
     prob = np.asarray(prob)
+    pred = prob.argmax(1) if pred is None else np.asarray(pred)
     keep = y >= 0
-    y, prob = y[keep], prob[keep]
-    pred = prob.argmax(1)
+    y, prob, pred = y[keep], prob[keep], pred[keep]
     labels = list(range(len(class_names)))
 
+    def call(scored):
+        return scored[:, -1].astype(int)
+
+    # The calls ride along as the last column, so the bootstrap resamples them with the probabilities.
+    scored = np.column_stack([prob, pred])
     metrics = {
-        "accuracy": lambda a, b: accuracy_score(a, b.argmax(1)),
-        "balanced_accuracy": lambda a, b: balanced_accuracy_score(a, b.argmax(1)),
-        "macro_f1": lambda a, b: f1_score(a, b.argmax(1), labels=labels, average="macro", zero_division=0),
-        "macro_auc": macro_auc,
+        "accuracy": lambda a, s: accuracy_score(a, call(s)),
+        "balanced_accuracy": lambda a, s: balanced_accuracy_score(a, call(s)),
+        "macro_f1": lambda a, s: f1_score(a, call(s), labels=labels, average="macro", zero_division=0),
+        "macro_auc": lambda a, s: macro_auc(a, s[:, :-1]),
     }
     rows = []
     for name, fn in metrics.items():
@@ -47,8 +55,8 @@ def classification_metrics(y: Sequence[int], prob: np.ndarray, class_names: Sequ
             # balanced accuracy then averages recall over the classes present and warns once per resample.
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
-                point, low, high = (bootstrap_ci(y_true=y, y_score=prob, metric=fn, seed=seed) if ci
-                                    else (fn(y, prob), np.nan, np.nan))
+                point, low, high = (bootstrap_ci(y_true=y, y_score=scored, metric=fn, seed=seed) if ci
+                                    else (fn(y, scored), np.nan, np.nan))
         except ValueError:
             point = low = high = np.nan
         rows.append({"metric": name, "value": point, "ci_low": low, "ci_high": high, "n": len(y)})

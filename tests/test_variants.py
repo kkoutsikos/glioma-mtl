@@ -9,7 +9,8 @@ import torch.nn as nn
 
 from glioma_mtl.config import load_config
 from glioma_mtl.data.metadata import TASKS
-from glioma_mtl.engine import add_derived_lgg_hgg
+from glioma_mtl.engine import add_derived_lgg_hgg, task_arrays, task_calls
+from glioma_mtl.evaluation import classification_metrics
 from glioma_mtl.experiment import ClassificationData, build_classifier
 from glioma_mtl.explain import grad_cam
 from glioma_mtl.models import MultiTaskGliomaNet
@@ -130,3 +131,28 @@ def test_lgg_hgg_labels_and_derived_probabilities():
     assert np.allclose(out["p_lgg_hgg_1"], df["p_grade_2"])
     own_head = out.assign(p_lgg_hgg_1=0.5)
     assert add_derived_lgg_hgg(own_head) is own_head          # a dedicated head is never overwritten
+
+
+def test_derived_lgg_hgg_call_follows_the_grade_call():
+    """Patient c is called grade 4 at P = 0.4: HGG, although P(HGG) = 0.4 is below 0.5."""
+    df = pd.DataFrame({"patient_id": ["a", "b", "c", "d"], "y_grade": [0, 1, 2, 2],
+                       "p_grade_0": [0.6, 0.2, 0.3, 0.1], "p_grade_1": [0.3, 0.5, 0.3, 0.2],
+                       "p_grade_2": [0.1, 0.3, 0.4, 0.7]})
+    derived = add_derived_lgg_hgg(df)
+    assert task_calls(derived, "lgg_hgg").tolist() == [0, 0, 1, 1]
+    assert task_arrays(derived, "lgg_hgg")[1].argmax(1).tolist() == [0, 0, 0, 1]
+    assert task_calls(derived, "grade").tolist() == [0, 1, 2, 2]
+    # A seed ensemble (mean of the prediction files) keeps the rule; a model's own head keeps its argmax.
+    assert task_calls(pd.concat([derived, derived]).groupby("patient_id").mean(numeric_only=True), "lgg_hgg").tolist() \
+        == [0, 0, 1, 1]
+    own_head = df.assign(y_lgg_hgg=[0, 0, 1, 1], p_lgg_hgg_0=[0.9, 0.8, 0.6, 0.2], p_lgg_hgg_1=[0.1, 0.2, 0.4, 0.8])
+    assert task_calls(own_head, "lgg_hgg").tolist() == [0, 0, 0, 1]
+
+    y, prob = task_arrays(derived, "lgg_hgg")
+    with_rule, cm = classification_metrics(y, prob, TASKS["lgg_hgg"][1], pred=task_calls(derived, "lgg_hgg"))
+    argmax, _ = classification_metrics(y, prob, TASKS["lgg_hgg"][1])
+    value = lambda t, m: t.set_index("metric").at[m, "value"]
+    assert value(with_rule, "balanced_accuracy") == 1.0 and value(argmax, "balanced_accuracy") == 0.75
+    assert value(with_rule, "macro_auc") == value(argmax, "macro_auc")   # AUC uses the probabilities only
+    assert with_rule.set_index("metric").at["balanced_accuracy", "ci_low"] == 1.0   # the calls are resampled too
+    assert cm.tolist() == [[2, 0], [0, 2]]

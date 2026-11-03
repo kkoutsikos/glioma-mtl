@@ -26,7 +26,7 @@ from sklearn.metrics import confusion_matrix
 
 from glioma_mtl import plotting
 from glioma_mtl.data.metadata import TASKS
-from glioma_mtl.engine import task_arrays
+from glioma_mtl.engine import task_arrays, task_calls
 from glioma_mtl.utils import read_history
 
 
@@ -120,7 +120,7 @@ def classification_figures(plan: dict, root: Path, out: Path) -> None:
             y = y.astype(int)
             keep = y >= 0
             classes = [str(c) for c in TASKS[task][1]]
-            cm = confusion_matrix(y[keep], prob[keep].argmax(1), labels=list(range(len(classes))))
+            cm = confusion_matrix(y[keep], task_calls(ens, task)[keep], labels=list(range(len(classes))))
             title = f"{exp}: {task} (test, {len(preds)}-seed ensemble, n={keep.sum()})"
             plotting.plot_confusion(cm, classes, out / f"{exp}_{task}_confusion.png", title)
             plotting.plot_roc(y[keep], prob[keep], classes, out / f"{exp}_{task}_roc.png", title)

@@ -22,7 +22,7 @@ import pandas as pd
 import yaml
 
 from glioma_mtl.data.metadata import TASKS
-from glioma_mtl.engine import task_arrays
+from glioma_mtl.engine import task_arrays, task_calls
 from glioma_mtl.engine.common import count_parameters
 from glioma_mtl.evaluation import bootstrap_ci, classification_metrics, paired_wilcoxon
 from glioma_mtl.models.segmentation import build_segmentation_model
@@ -194,7 +194,8 @@ def classification_table(plan: dict, root: Path) -> pd.DataFrame | None:
                 vals = sub.loc[sub["metric"] == metric, "value"].astype(float)
                 row[metric] = fmt(vals.mean(), vals.std() if len(vals) > 1 else None)
             y, prob = task_arrays(ensemble, task)
-            table, _ = classification_metrics(y.astype(int), prob, [str(c) for c in TASKS[task][1]])
+            table, _ = classification_metrics(y.astype(int), prob, [str(c) for c in TASKS[task][1]],
+                                              pred=task_calls(ensemble, task))
             t = table.set_index("metric")
             for metric in ("balanced_accuracy", "macro_auc"):
                 row[f"ensemble_{metric}"] = fmt(t.at[metric, "value"], lo=t.at[metric, "ci_low"], hi=t.at[metric, "ci_high"])
