@@ -6,11 +6,15 @@
 Produces (whatever inputs exist):
   curves/<run>.png                       training curves of every run (SSL, segmentation, classification)
   segmentation_dice.png, _hd95.png        per-patient test distributions per model (seed-averaged)
+  segmentation_dice_vs_volume.png         per-patient Dice against ground-truth tumour volume, one panel per model
   segmentation_cases.png                  best / median / worst test case, every model (--qualitative)
   <experiment>_<task>_confusion.png, _roc.png   seed-ensemble on the held-out test split
   kfold_<task>_<metric>.png               repeated k-fold CV, mean ± SD
   kfold_shap_<task>.png                   XGBoost TreeSHAP importance per modality on the hold-out test
   explain/<experiment>_*.png              attention / occlusion summaries copied from the explain stage
+  learning_curve_<task>.png               late-fusion macro AUC against training-set size (XGBoost)
+  calibration_<task>.png, decision_curve_<task>.png   reliability and net benefit for LGG/HGG and IDH (out-of-fold)
+  radiomics_stability.png                 ICC of each radiomics feature, predicted vs expert masks, per feature class
 """
 from __future__ import annotations
 
@@ -30,6 +34,16 @@ from glioma_mtl.engine import task_arrays, task_calls
 from glioma_mtl.utils import read_history
 
 
+# Names of the segmentation runs in the figures (run folders and tables keep the run names).
+SEG_LABELS = {"seg_swin_unetr": "SwinUNETR", "seg_swin_unetr_ssl": "SwinUNETR + SSL", "seg_segresnet": "SegResNet",
+              "seg_unet": "3D U-Net", "seg_unet_thesis": "3D U-Net (narrow)", "seg_segmamba": "SegMamba",
+              "seg_segmamba_lr5e5": "SegMamba (lr 5e-5)"}
+
+
+def seg_label(model: str) -> str:
+    return SEG_LABELS.get(model, model)
+
+
 def training_curves(root: Path, out: Path) -> None:
     for history in sorted(root.glob("*/history.csv")):  # completed from log.txt for runs that predate the logger fix
         run = history.parent
@@ -44,12 +58,17 @@ def segmentation_figures(plan: dict, root: Path, out: Path) -> dict[str, pd.Data
                   if (p := root / f"{model}_s{s}" / "per_case_segmentation_test.csv").exists()]
         if frames:
             cat = pd.concat(frames).replace([np.inf, -np.inf], np.nan)
-            averaged[model] = cat.groupby("patient_id")[["dice", "hd95"]].mean().reset_index()
+            cols = [c for c in ("dice", "hd95", "gt_volume_ml") if c in cat]
+            averaged[model] = cat.groupby("patient_id")[cols].mean().reset_index()
     if averaged:
-        plotting.plot_box({m: d["dice"] for m, d in averaged.items()}, out / "segmentation_dice.png", "Dice",
+        plotting.plot_box({seg_label(m): d["dice"] for m, d in averaged.items()}, out / "segmentation_dice.png", "Dice",
                           "Segmentation test Dice per patient")
-        plotting.plot_box({m: d["hd95"] for m, d in averaged.items()}, out / "segmentation_hd95.png", "HD95 (mm)",
-                          "Segmentation test HD95 per patient")
+        plotting.plot_box({seg_label(m): d["hd95"] for m, d in averaged.items()}, out / "segmentation_hd95.png",
+                          "HD95 (mm)", "Segmentation test HD95 per patient")
+        with_volume = {seg_label(m): d for m, d in averaged.items() if "gt_volume_ml" in d}
+        if with_volume:
+            plotting.plot_dice_vs_volume(with_volume, out / "segmentation_dice_vs_volume.png",
+                                         "Test Dice against ground-truth tumour volume")
     return averaged
 
 
@@ -97,14 +116,15 @@ def qualitative_cases(plan: dict, root: Path, out: Path, averaged: dict[str, pd.
             case = cases[rec["patient_id"]]
             case.setdefault("image", item["image"][0].numpy())
             case.setdefault("gt", item["label"][0].numpy() > 0.5)
-            case["preds"][model_name] = pred
+            case["preds"][seg_label(model_name)] = pred
             row = averaged[model_name].set_index("patient_id")
-            case["dice"][model_name] = float(row.at[rec["patient_id"], "dice"]) if rec["patient_id"] in row.index else None
+            case["dice"][seg_label(model_name)] = (float(row.at[rec["patient_id"], "dice"])
+                                                   if rec["patient_id"] in row.index else None)
         del model
     ready = [c for c in cases.values() if "image" in c]
     if ready:
         plotting.plot_seg_cases(ready, out / "segmentation_cases.png",
-                                f"Best / median / worst test case of {best}, all models")
+                                f"Best / median / worst test case of {seg_label(best)}, all models")
 
 
 def classification_figures(plan: dict, root: Path, out: Path) -> None:
@@ -155,6 +175,69 @@ def kfold_figures(root: Path, out: Path) -> None:
                                f"{task}, XGBoost on {feats}: top-15 features (hold-out)", "mean |SHAP|")
 
 
+# Late-fusion feature sets drawn in the learning-curve and calibration figures (XGBoost, the primary model).
+FIGURE_FEATURE_SETS = ["age+sex", "radiomics", "image", "clinical+radiomics", "image+clinical+radiomics"]
+
+
+def learning_curve_figures(root: Path, out: Path, model: str = "xgboost") -> None:
+    path = root / "learning_curves" / "learning_curves.csv"
+    if not path.exists():
+        return
+    df = pd.read_csv(path)
+    for task, sub in df[df["model"] == model].groupby("task"):
+        curves = {}
+        for fs in [f for f in FIGURE_FEATURE_SETS if f in set(sub["features"])]:
+            s = sub[sub["features"] == fs].groupby("fraction").agg(n=("n_train", "mean"), m=("macro_auc", "mean"),
+                                                                   sd=("macro_auc", "std"))
+            curves[fs] = (s["n"], s["m"], s["sd"])
+        plotting.plot_lines(curves, out / f"learning_curve_{task}.png",
+                            f"{task}: macro AUC against training-set size ({model}, mean ± SD over test folds)",
+                            "training patients", "macro AUC")
+
+
+def calibration_figures(root: Path, out: Path, model: str = "xgboost") -> None:
+    """Reliability diagrams and decision curves for the binary tasks, from the late-fusion out-of-fold predictions."""
+    from glioma_mtl.evaluation import net_benefit, reliability_curve, treat_all_net_benefit
+
+    path = root / "kfold_cv" / "oof_predictions.csv"
+    if not path.exists():
+        return
+    oof = pd.read_csv(path)
+    thresholds = np.linspace(0.05, 0.8, 16)
+    for task in ("lgg_hgg", "idh"):
+        sub = oof[(oof["task"] == task) & (oof["model"] == model)]
+        sets = [f for f in FIGURE_FEATURE_SETS if f in set(sub["features"])]
+        if sub.empty or not sets:
+            continue
+        positive = TASKS[task][1][1]
+        reliability, decision = {}, {}
+        for fs in sets:
+            g = sub[sub["features"] == fs]
+            mean_p, observed, _ = reliability_curve(g["y"], g["p_1"])
+            reliability[fs] = (mean_p, observed, None)
+            decision[fs] = (thresholds, net_benefit(g["y"], g["p_1"], thresholds), None)
+        y = sub[sub["features"] == sets[0]]["y"]
+        decision["treat all"] = (thresholds, treat_all_net_benefit(y, thresholds), None)
+        plotting.plot_lines(reliability, out / f"calibration_{task}.png",
+                            f"{task}: reliability of P({positive}) ({model}, out-of-fold, n={len(y)})",
+                            "mean predicted probability", "observed rate", reference=([0, 1], [0, 1], "perfect"),
+                            ylim=(-0.02, 1.02))
+        nb = np.concatenate([c[1] for c in decision.values()])
+        plotting.plot_lines(decision, out / f"decision_curve_{task}.png",
+                            f"{task}: decision curve for calling {positive} ({model}, out-of-fold)",
+                            "threshold probability", "net benefit", reference=(thresholds, np.zeros_like(thresholds),
+                                                                                "treat none"),
+                            ylim=(min(-0.05, float(np.nanmin(nb))), float(np.nanmax(nb)) + 0.05))
+
+
+def radiomics_stability_figure(root: Path, out: Path) -> None:
+    path = root / "paper_tables" / "radiomics_stability_per_feature.csv"
+    if path.exists():
+        df = pd.read_csv(path)
+        plotting.plot_box({c: g["icc"] for c, g in df.groupby("feature_class")}, out / "radiomics_stability.png",
+                          "ICC(2,1)", "Radiomics agreement, predicted vs expert masks (held-out patients)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--plan", required=True)
@@ -173,6 +256,9 @@ def main() -> None:
         qualitative_cases(plan, root, out, averaged)
     classification_figures(plan, root, out)
     kfold_figures(root, out)
+    learning_curve_figures(root, out)
+    calibration_figures(root, out)
+    radiomics_stability_figure(root, out)
     print(f"Saved {len(list(out.rglob('*.png')))} figures to {out}")
 
 

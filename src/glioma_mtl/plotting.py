@@ -95,6 +95,53 @@ def plot_box(data: Mapping[str, Sequence[float]], out: str | Path, ylabel: str, 
     return _save(fig, out)
 
 
+def plot_dice_vs_volume(data: Mapping[str, pd.DataFrame], out: str | Path, title: str) -> Path:
+    """Per-patient Dice against ground-truth tumour volume (log scale), one panel per model."""
+    names = list(data)
+    cols = min(4, len(names))
+    rows = int(np.ceil(len(names) / cols))
+    fig = Figure(figsize=(3.2 * cols, 2.8 * rows + 0.6))
+    axes = fig.subplots(rows, cols, sharex=True, sharey=True, squeeze=False).ravel()
+    for ax, name in zip(axes, names):
+        d = data[name]
+        ax.scatter(d["gt_volume_ml"], d["dice"], s=10, alpha=0.6)
+        ax.set_xscale("log")
+        ax.set_title(name, fontsize=9)
+        ax.axhline(0.5, color="grey", lw=0.8, ls="--")
+        ax.grid(alpha=0.3)
+    for ax in axes[len(names):]:
+        ax.set_visible(False)
+    for ax in axes[max(len(names) - cols, 0):len(names)]:    # the lowest visible panel of each column
+        ax.xaxis.set_tick_params(labelbottom=True)
+        ax.set_xlabel("tumour volume (mL)")
+    for ax in axes[::cols]:
+        ax.set_ylabel("Dice")
+    fig.suptitle(title)
+    return _save(fig, out)
+
+
+def plot_lines(curves: Mapping[str, tuple[Sequence[float], Sequence[float], Sequence[float] | None]], out: str | Path,
+               title: str, xlabel: str, ylabel: str, reference: tuple[Sequence[float], Sequence[float], str] | None = None,
+               ylim: tuple[float, float] | None = None) -> Path:
+    """One line per label from ``(x, y, sd)`` (a band of ±sd when given), plus an optional dashed reference line."""
+    fig = Figure(figsize=(6, 4.2))
+    ax = fig.subplots()
+    for label, (x, y, sd) in curves.items():
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        line, = ax.plot(x, y, marker="o", ms=3, label=label)
+        if sd is not None:
+            sd = np.asarray(sd, dtype=float)
+            ax.fill_between(x, y - sd, y + sd, color=line.get_color(), alpha=0.15)
+    if reference is not None:
+        ax.plot(reference[0], reference[1], "--", color="grey", lw=1, label=reference[2])
+    ax.set(xlabel=xlabel, ylabel=ylabel, title=title)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.3)
+    return _save(fig, out)
+
+
 def plot_confusion(cm: np.ndarray, classes: Sequence, out: str | Path, title: str) -> Path:
     classes = short(classes)
     rows = cm.sum(1, keepdims=True)

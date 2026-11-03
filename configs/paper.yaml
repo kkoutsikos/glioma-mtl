@@ -69,3 +69,4 @@ kfold:                                  # XGBoost / logistic regression / RF / M
   use_deep_features: true
   use_radiomics: true
   holdout: true
+  learning_curve: true                  # AUC against training-set size (kfold_cv.yaml: learning_curve), CPU

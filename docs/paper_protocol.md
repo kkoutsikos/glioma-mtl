@@ -85,7 +85,9 @@ reference rows.
 | `features` | 1 + 1 | label-free deep features, radiomics from predicted masks | – |
 | `cls` | 9 experiments × seeds. **Main ladder** (same model, only inputs change): image only → image + clinical → image + clinical + radiomics. A **leaky reference ladder** with the thesis clinical vector (image + thesis clinical → + radiomics) sits side by side with the last two rungs. The corrected thesis architectures (cascade, multi-scale, Trinity, SegMamba backbone) complete the set. | what each input adds for grade / diagnosis / LGG vs HGG; which fusion design helps; what post-operative molecular data explain (reference) | `classification` |
 | `explain` | first seed of each classifier | which modality / image scale drives each prediction: fusion attention, token occlusion, 3D Grad-CAM per test patient; a Grad-CAM panel per task for the paper (step `gradcam_panel`) | figures |
-| `kfold` | repeated 5-fold × 10 + hold-out | the same ladder as late fusion (image → image + clinical → image + clinical + radiomics, with XGBoost / logistic regression / RF / MLP; "image" = label-free deep features), no-imaging baselines (age + sex, clinical, radiomics), leaky references; XGBoost TreeSHAP per modality | `kfold_cv`, `kfold_holdout` |
+| `kfold` | repeated 5-fold × 10 + hold-out | the same ladder as late fusion (image → image + clinical → image + clinical + radiomics, with XGBoost / logistic regression / RF / MLP; "image" = label-free deep features), no-imaging baselines (age + sex, clinical, radiomics), leaky references; XGBoost TreeSHAP per modality; every fold's score (`cv_folds.csv`) | `kfold_cv`, `kfold_holdout`, `kfold_tests` |
+| `learning_curves` (stage `kfold`) | late fusion fit on 25 / 50 / 75 / 100% of each training fold, scored on the full test folds (5-fold × 4) | does any feature set, deep features in particular, keep improving with more patients? | `learning_curves` |
+| `oracle` | every classifier re-evaluated + late fusion refit, nothing retrained | what segmentation errors cost: the same models with ground-truth masks for the crop centre, radiomics and deep features (inside the network the tumour weighting stays its own segmentation head's) | `classification_oracle`, `kfold_oracle` |
 | `aggregate` | – | writes all tables (CSV, Markdown, LaTeX) | – |
 | `figures` | – | training curves, segmentation boxplots + qualitative overlays, confusion matrices, ROC curves, k-fold bars, SHAP | figures |
 
@@ -122,6 +124,36 @@ backbone follows the thesis design and was fixed after the segmentation benchmar
 the best segmentation model unless the segmentation table shows that. Report how many classification
 patients got an empty or near-empty predicted mask (`per_case_classification_<split>.csv`): their crops
 fall back to the volume centre and their radiomics are imputed.
+
+### Statistical comparisons
+
+The comparisons were fixed before any of them was tested (`CLS_COMPARISONS` and `KFOLD_COMPARISONS` in
+`scripts/aggregate_results.py`); report all of them, not only the significant ones.
+
+- **End-to-end, test patients** (seed ensembles, `classification_tests`): each rung of the ladder against the
+  one below (clinical token, radiomics token) and each corrected original design against the ladder model with
+  the same inputs. Difference of AUCs: DeLong's test for LGG vs HGG, a paired bootstrap of the macro AUC
+  (2,000 patient resamples) for grade and diagnosis. Holm within each task.
+- **Late fusion, CV folds** (`kfold_tests`, XGBoost and logistic regression, macro AUC): radiomics added to
+  clinical, deep features added to clinical, deep features added to clinical + radiomics, radiomics against
+  deep features. Nadeau–Bengio corrected resampled t-test over the 50 folds (the folds are identical for every
+  feature set and model of a task). Holm within each task and model.
+- **Ground-truth masks** (`classification_oracle`, `kfold_oracle`): the same tests, GT against predicted masks.
+
+`kfold` reruns once to save the fold scores and the out-of-fold predictions (`KFOLD_VERSION`); its summary
+numbers do not change.
+
+### Further analyses (all from existing outputs, CPU only)
+
+- **Segmentation against tumour volume** (`segmentation_by_volume`, `segmentation_dice_vs_volume.png`): Spearman
+  correlation of Dice with the ground-truth volume, and Dice per volume tertile.
+- **Calibration and clinical usefulness** (`calibration_end_to_end`, `calibration_late_fusion`,
+  `calibration_<task>.png`, `decision_curve_<task>.png`): multi-class Brier score and ECE; reliability diagrams and
+  decision curves for LGG vs HGG and IDH from the late-fusion out-of-fold predictions (one 5-fold pass over all
+  162 patients). The models are trained with balanced class weights, which distorts calibration by design; say so.
+- **Radiomics stability** (`radiomics_stability`, `radiomics_stability.png`, after the `oracle` stage): ICC(2,1)
+  and Lin's CCC of every feature between predicted and expert masks, on the classification validation and test
+  patients only (the backbone's own training patients would flatter the agreement).
 
 ### About the k-fold late fusion
 

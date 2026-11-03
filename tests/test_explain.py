@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+import pandas as pd  # after torch (see glioma_mtl/__init__.py)
 
 from glioma_mtl import plotting
 from glioma_mtl.engine import predict
@@ -91,6 +92,10 @@ def test_plots_write_files(tmp_path):
         plotting.plot_box({"m1": rng.random(10), "m2": rng.random(10)}, tmp_path / "box.png", "Dice", "box"),
         plotting.plot_seg_cases([{"case": "p1", "image": vol, "gt": gt, "preds": {"m1": gt}, "dice": {"m1": 1.0}}],
                                 tmp_path / "cases.png", "cases"),
+        plotting.plot_dice_vs_volume({f"m{i}": pd.DataFrame({"gt_volume_ml": [1, 10, 100], "dice": [0.2, 0.8, 0.9]})
+                                      for i in range(5)}, tmp_path / "volume.png", "volume"),
+        plotting.plot_lines({"a": ([10, 20], [0.6, 0.7], [0.05, 0.04]), "b": ([10, 20], [0.5, 0.6], None)},
+                            tmp_path / "lines.png", "lines", "n", "AUC", reference=([10, 20], [0.5, 0.5], "chance")),
     ]
     assert all(p.exists() and p.stat().st_size > 1000 for p in paths)
 

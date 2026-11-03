@@ -87,6 +87,9 @@ Tables are written to `runs/paper/paper_tables/` (CSV, Markdown, LaTeX) and figu
 `runs/paper/paper_figures/`. Explanations (fusion attention, token occlusion, 3D Grad-CAM) are in each
 classifier's `explain/` folder; the paper's Grad-CAM panels (`gradcam_panel_<task>.png`, one test patient
 per class) are also copied to `paper_figures/explain/`. XGBoost TreeSHAP is in `kfold_cv/holdout_shap.csv`.
+The tables include tests of the pre-specified comparisons (DeLong / paired bootstrap on the test patients,
+Nadeau–Bengio corrected t-test over the CV folds) and the `oracle` stage's ground-truth-mask analysis (the same
+models scored with ground-truth instead of predicted masks); see `docs/paper_protocol.md`.
 
 ## Usage
 

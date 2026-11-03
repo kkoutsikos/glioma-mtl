@@ -405,6 +405,171 @@ def test_a_new_evaluation_version_re_evaluates_without_retraining(tmp_path):
     assert train.run_dir.exists()
 
 
+def test_oracle_stage_rescores_the_trained_models_with_ground_truth_masks(tmp_path):
+    """The oracle stage re-evaluates every classifier and refits late fusion on GT-mask features, retraining nothing."""
+    import yaml
+
+    runner = _load_script("run_paper")
+    plan = yaml.safe_load((runner.REPO / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    steps = runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]
+    by_id = {s.id: s for s in steps}
+    oracle = [s for s in steps if s.stage == "oracle"]
+    assert all(s.optional and s.run_dir is None for s in oracle)
+    order = [s.id for s in steps]
+    assert order.index("kfold") < order.index(oracle[0].id) < order.index("aggregate")
+
+    plain, gt = by_id["cls_eval:cls_image_clinical_radiomics_s42"], by_id["cls_oracle:cls_image_clinical_radiomics_s42"]
+    assert gt.version == plain.version and "data.crop_mask_key=label" in gt.args
+    assert gt.args[gt.args.index("--out-dir") + 1].endswith("cls_image_clinical_radiomics_s42/oracle")
+    assert any(a.endswith("radiomics_label/radiomics_label.csv") for a in gt.args)
+    assert "oracle_features:radiomics" in gt.needs and "cls_train:cls_image_clinical_radiomics_s42" in gt.needs
+    image_only = by_id["cls_oracle:cls_image_only_s42"]
+    assert not any("radiomics" in a for a in image_only.args) and image_only.needs == ["cls_train:cls_image_only_s42"]
+
+    kfold = by_id["kfold_oracle"]
+    assert {"oracle_features:radiomics", "oracle_features:deep"} == set(kfold.needs)
+    assert kfold.args[kfold.args.index("--out-dir") + 1].endswith("kfold_cv_oracle")
+    assert f"cv.feature_sets=[{', '.join(runner.ORACLE_FEATURE_SETS)}]" in kfold.args
+    assert by_id["kfold"].version.endswith(runner.KFOLD_VERSION)      # reruns once, to save the fold scores
+    assert "--mask-source" in by_id["oracle_features:deep"].args
+
+    plan["oracle"] = False
+    assert not [s for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0] if s.stage == "oracle"]
+
+    curves = by_id["learning_curves"]
+    assert curves.stage == "kfold" and curves.optional and "--learning-curve" in curves.args
+    assert curves.needs == by_id["kfold"].needs and curves.version.endswith(runner.LEARNING_CURVE_VERSION)
+    plan["kfold"]["learning_curve"] = False
+    assert "learning_curves" not in {s.id for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]}
+
+
+def test_kfold_saves_every_fold_score_on_folds_shared_by_all_feature_sets(tmp_path, metadata_csv, monkeypatch):
+    kfold = _load_script("kfold_cv")
+    meta = pd.read_csv(metadata_csv)
+    cohort = tmp_path / "cohort.csv"
+    meta[["ID"]].to_csv(cohort, index=False)
+    out = tmp_path / "cv"
+    config = str(SCRIPTS.parent / "configs" / "kfold_cv.yaml")
+    overrides = [f"data.metadata_csv={metadata_csv.as_posix()}", f"data.cohort_csv={cohort.as_posix()}",
+                 f"data.splits_file={(tmp_path / 'none.json').as_posix()}", "tasks=[grade]", "cv.folds=2",
+                 "cv.repeats=2", "cv.models=[logreg]", "cv.feature_sets=[age+sex, clinical]"]
+    monkeypatch.setattr(sys, "argv", ["kfold_cv.py", "--config", config, "--out-dir", str(out), "--set", *overrides])
+    kfold.main()
+    folds = pd.read_csv(out / "cv_folds.csv")
+    summary = pd.read_csv(out / "cv_results.csv")
+    assert set(folds["features"]) == {"-", "age+sex", "clinical"} and sorted(folds["fold"].unique()) == [0, 1, 2, 3]
+    auc = folds[folds["metric"] == "macro_auc"]
+    sizes = auc.groupby("fold")[["n_train", "n_test"]].nunique()
+    assert (sizes == 1).all().all() and (auc["n_train"] + auc["n_test"] == len(meta)).all()   # same folds everywhere
+    lr = auc[(auc["features"] == "clinical") & (auc["model"] == "logreg")]["value"]
+    row = summary[(summary["features"] == "clinical") & (summary["metric"] == "macro_auc")].iloc[0]
+    assert np.isclose(lr.mean(), row["mean"])
+
+    oof = pd.read_csv(out / "oof_predictions.csv")                   # one out-of-fold row per patient and model
+    assert oof.groupby(["features", "model"]).size().eq(len(meta)).all()
+    assert np.allclose(oof[["p_0", "p_1", "p_2"]].sum(1), 1.0)
+
+    curve_dir = tmp_path / "curves"
+    monkeypatch.setattr(sys, "argv", [
+        "kfold_cv.py", "--config", config, "--learning-curve", "--out-dir", str(curve_dir), "--set", *overrides,
+        "learning_curve.fractions=[0.5, 1.0]", "learning_curve.repeats=1", "learning_curve.models=[logreg]",
+        "learning_curve.feature_sets=[age+sex, clinical]"])
+    kfold.main()
+    curves = pd.read_csv(curve_dir / "learning_curves.csv")
+    assert set(curves["fraction"]) == {0.5, 1.0} and curves["macro_auc"].notna().all()
+    sizes = curves.groupby("fraction")["n_train"].mean()
+    assert sizes[0.5] < sizes[1.0] == len(meta) / 2                  # 2 folds: half the cohort trains
+    assert curves.groupby(["fraction", "fold"])["n_train"].nunique().eq(1).all()   # same subsample for every set
+
+
+def _write_predictions(path: Path, y: np.ndarray, prob: np.ndarray, task: str = "diagnosis") -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame({"patient_id": [f"P{i}" for i in range(len(y))], f"y_{task}": y,
+                       **{f"p_{task}_{k}": prob[:, k] for k in range(prob.shape[1])}})
+    df.to_csv(path / "predictions_test.csv", index=False)
+
+
+def test_aggregate_tests_the_prespecified_comparisons_and_the_oracle(tmp_path):
+    agg = _load_script("aggregate_results")
+    rng = np.random.default_rng(0)
+    y = np.repeat([0, 1, 2, 3], 10)
+    sharp = np.exp(np.eye(4)[y] * 2.5 + rng.normal(0, 1, (40, 4)))
+    blurred = np.exp(np.eye(4)[y] * 0.5 + rng.normal(0, 1, (40, 4)))
+    probs = {"cls_image_only": blurred, "cls_image_clinical": sharp}
+    for exp, p in probs.items():
+        _write_predictions(tmp_path / f"{exp}_s42", y, p / p.sum(1, keepdims=True))
+    _write_predictions(tmp_path / "cls_image_only_s42" / "oracle", y, sharp / sharp.sum(1, keepdims=True))
+    plan = {"classification": {"seeds": [42], "experiments": {e: {} for e in probs}}}
+
+    tests = agg.classification_tests(plan, tmp_path)
+    assert len(tests) == 1 and tests.iloc[0]["comparison"] == "clinical token"   # the only pair that exists
+    assert float(tests.iloc[0]["p"]) < 0.05 and tests.iloc[0]["test"] == "paired bootstrap"
+    oracle = agg.classification_oracle_table(plan, tmp_path)
+    assert list(oracle["experiment"]) == ["cls_image_only"]
+    assert float(oracle.iloc[0]["auc_gt_masks"]) > float(oracle.iloc[0]["auc_predicted_masks"])
+
+    rows = []
+    for out, shift in (("kfold_cv", 0.0), ("kfold_cv_oracle", 0.03)):
+        for fs, base in (("clinical", 0.70), ("clinical+radiomics", 0.80)):
+            rows += [{"out": out, "task": "grade", "features": fs, "model": "xgboost", "metric": "macro_auc", "fold": i,
+                      "value": base + shift + rng.normal(0, 0.02), "n_train": 128, "n_test": 32} for i in range(50)]
+    for out, g in pd.DataFrame(rows).groupby("out"):
+        (tmp_path / out).mkdir()
+        g.drop(columns="out").to_csv(tmp_path / out / "cv_folds.csv", index=False)
+    kt = agg.kfold_tests(tmp_path)
+    assert list(kt["comparison"]) == ["radiomics added to clinical"] and float(kt.iloc[0]["p"]) < 0.001
+    ko = agg.kfold_oracle_table(tmp_path)
+    assert set(ko["features"]) == {"clinical", "clinical+radiomics"} and (ko["delta_auc"].str.startswith("+")).all()
+
+
+def test_aggregate_volume_calibration_curves_and_radiomics_stability(tmp_path):
+    agg = _load_script("aggregate_results")
+    rng = np.random.default_rng(1)
+    volume = np.geomspace(1, 200, 30)
+    for model, noise in (("seg_a", 0.02), ("seg_b", 0.1)):
+        run = tmp_path / f"{model}_s42"
+        run.mkdir()
+        pd.DataFrame({"patient_id": [f"P{i}" for i in range(30)], "gt_volume_ml": volume,
+                      "dice": np.clip(0.5 + 0.2 * np.log10(volume) + rng.normal(0, noise, 30), 0, 1)}).to_csv(
+            run / "per_case_segmentation_test.csv", index=False)
+    plan = {"segmentation": {"seeds": [42], "models": {"seg_a": {}, "seg_b": {}}},
+            "classification": {"seeds": [42], "experiments": {}}}
+    table, edges = agg.segmentation_volume_table(plan, tmp_path)
+    assert list(table["model"]) == ["seg_a", "seg_b"] and (table["spearman_rho"].astype(float) > 0.5).all()
+    assert edges[0] < edges[1] and float(table.iloc[0]["median_dice_small"]) < float(table.iloc[0]["median_dice_large"])
+
+    (tmp_path / "kfold_cv").mkdir()
+    y = np.repeat([0, 1], 20)
+    pd.DataFrame({"task": "lgg_hgg", "features": "age+sex", "model": "xgboost", "patient_id": range(40), "y": y,
+                  "p_0": 1 - y * 0.8 - 0.1, "p_1": y * 0.8 + 0.1}).to_csv(tmp_path / "kfold_cv" / "oof_predictions.csv",
+                                                                         index=False)
+    e2e, late = agg.calibration_tables(plan, tmp_path)
+    assert e2e is None and np.isclose(float(late.iloc[0]["brier"]), 2 * 0.1 ** 2)   # two-class Brier, doubled
+
+    (tmp_path / "learning_curves").mkdir()
+    pd.DataFrame([{"task": "grade", "features": "radiomics", "model": "xgboost", "fraction": f, "n_train": 100 * f,
+                   "fold": k, "macro_auc": 0.6 + 0.1 * f} for f in (0.5, 1.0) for k in range(3)]).to_csv(
+        tmp_path / "learning_curves" / "learning_curves.csv", index=False)
+    curves = agg.learning_curve_table(tmp_path)
+    assert list(curves.columns[-2:]) == ["50%", "100%"] and curves.iloc[0]["100%"].startswith("0.700")
+
+    ids = [f"UCSF-PDGM-{i:04d}" for i in range(1, 21)]
+    gt = pd.DataFrame({"patient_id": ids, "original_shape_Volume": rng.uniform(10, 100, 20),
+                       "original_glcm_Contrast": rng.uniform(0, 1, 20)})
+    pred = gt.assign(original_shape_Volume=gt["original_shape_Volume"] * 1.01,       # robust
+                     original_glcm_Contrast=rng.uniform(0, 1, 20))                   # unrelated
+    for folder, df, name in (("radiomics", pred, "radiomics_pred.csv"), ("radiomics_label", gt, "radiomics_label.csv")):
+        (tmp_path / folder).mkdir()
+        df.to_csv(tmp_path / folder / name, index=False)
+    (tmp_path / "splits_seed42.json").write_text(json.dumps({"classification": {"train": ids[:5], "val": ids[5:12],
+                                                                                 "test": ids[12:]}}))
+    per_feature, summary, patients = agg.radiomics_stability(tmp_path)
+    assert patients.startswith("classification validation") and set(per_feature["n"]) == {15}
+    icc = per_feature.set_index("feature")["icc"]
+    assert icc["original_shape_Volume"] > 0.95 and icc["original_glcm_Contrast"] < 0.5
+    assert set(summary["feature_class"]) == {"shape", "glcm"}
+
+
 def test_the_gradcam_panel_is_its_own_explain_step(tmp_path):
     """The paper's Grad-CAM figure runs after a finished explain step without redoing the per-patient maps."""
     import yaml

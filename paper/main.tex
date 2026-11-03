@@ -1,0 +1,743 @@
+% Draft manuscript. Numbers come from runs/paper (paper_runs/) as of 3 Nov 2026: one seed per model.
+% Figures are read from ../paper_runs/paper_figures/ (the Colab output, not in git); see README.md.
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{../paper_runs/paper_figures/}}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\ci}[2]{\,[#1, #2]}
+
+\title{What does T2-weighted MRI add to glioma grading and WHO~2021 subtyping? A leakage-controlled benchmark of
+segmentation, deep features and radiomics}
+\author{Konstantinos Koutsikos\thanks{School of Electrical and Computer Engineering, National Technical
+University of Athens, Greece. \todo{co-authors, e-mail}}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent\textbf{Purpose.} Deep-learning pipelines that grade gliomas and predict their WHO~2021 subtype from MRI
+are usually developed on small cohorts. There, label leakage and single-split evaluation can inflate results, and it
+is often unclear what the images add beyond demographics. We built a leakage-controlled multimodal pipeline and
+measured what each input and design choice contributes.
+
+\noindent\textbf{Methods.} On T2-weighted MRI from the UCSF-PDGM dataset we benchmarked seven segmentation
+configurations (SwinUNETR with and without self-supervised pretraining, SegResNet, two 3D U-Net configurations,
+SegMamba at two learning rates) on 75 held-out patients. On a grade-balanced 162-patient cohort we trained
+end-to-end multi-task classifiers and late-fusion models for three-way WHO grade, four-way WHO~2021 diagnosis, LGG
+versus HGG and IDH status. Inputs were limited to the images, pre-operative clinical variables and radiomics.
+Molecular and surgical variables, which define or follow the labels, were used only in a labelled reference
+experiment. One nested patient-level split was fixed before training and every feature selector was fit on training
+data only. We report bootstrap confidence intervals, pre-specified paired tests, repeated 5-fold cross-validation
+(CV) and an analysis with ground-truth tumour masks.
+
+\noindent\textbf{Results.} SegResNet reached the highest Dice (0.865, 95\% CI 0.828--0.899) and the lowest HD95
+(11.7~mm). The best SegMamba and SwinUNETR runs matched its Dice but had significantly larger HD95, and
+self-supervised pretraining gave no gain (Dice 0.842 vs 0.843). Molecular and surgical variables (IDH, 1p/19q,
+MGMT, extent of resection) alone gave a CV diagnosis AUC of 0.93 without any imaging. Without them, the best CV
+diagnosis AUC was $0.836 \pm 0.053$ for clinical variables plus radiomics, and adding deep image features gave
+$0.835 \pm 0.047$. Age and sex alone predicted IDH status with a CV AUC of 0.85--0.90. An end-to-end image +
+clinical + radiomics model reached a test diagnosis AUC of 0.916 (0.837--0.985) but 0.619 on the validation split
+of the same size and class mix, and no pre-specified difference between end-to-end models was significant after
+correction.
+
+\noindent\textbf{Conclusions.} Without leakage, T2-weighted imaging adds information mainly through hand-crafted
+radiomics, deep features add nothing beyond them, and results on a single 25-patient split are too variable to rank
+models. Code and the experiment protocol are public.
+\end{abstract}
+
+\noindent\textbf{Keywords:} glioma, WHO~2021, radiogenomics, data leakage, segmentation benchmark, SegMamba,
+self-supervised learning, radiomics, small data.
+
+% ---------------------------------------------------------------------------------------------------------
+\section{Introduction}
+
+The 2021 WHO classification of central nervous system tumours made molecular markers part of the diagnosis of
+diffuse gliomas: IDH status separates IDH-mutant astrocytomas and oligodendrogliomas from IDH-wildtype
+glioblastomas, and 1p/19q codeletion defines oligodendroglioma~\cite{louis2021who}. Predicting these markers and the
+WHO grade from pre-operative MRI (a ``virtual biopsy'') has been studied extensively with deep networks and
+radiomics~\cite{chang2018ajnr,chang2018ccr,choi2021idh,patel2017mismatch}. Most such studies train on a few hundred
+patients or fewer. In that regime, how a model is evaluated can move results as much as which model it is.
+Leakage from inputs that encode the label, feature selection done before the split, overlapping training and test
+patients across pipeline stages, and conclusions drawn from one small test set are all common in medical machine
+learning~\cite{kapoor2023leakage,varoquaux2022failures,varoquaux2018cv}.
+
+Typical pipelines chain three steps: they segment the tumour, extract features, and classify. Each step invites a
+design choice whose value is rarely isolated:
+\begin{itemize}
+  \item state-space and transformer segmenters~\cite{xing2024segmamba,hatamizadeh2022swinunetr} against convolutional
+        ones~\cite{myronenko2019segresnet,isensee2021nnunet}, with or without self-supervised
+        pretraining~\cite{tang2022ssl};
+  \item deep features from the segmentation network against hand-crafted radiomics~\cite{vangriethuysen2017pyradiomics};
+  \item end-to-end multi-task fusion against gradient-boosted late fusion~\cite{chen2016xgboost}.
+\end{itemize}
+Clinical variables are a further source of ambiguity. Some, such as age, are known before surgery. Others, such as
+IDH, 1p/19q and extent of resection, come from tissue or surgery, and IDH and 1p/19q define the diagnosis being
+predicted.
+
+We built one pipeline in which each of these choices can be switched independently, held every evaluation detail
+fixed, and asked four questions on T2-weighted MRI:
+\begin{enumerate}
+  \item Which architecture segments the whole tumour best, and does self-supervised pretraining help?
+  \item What does imaging add for grade, diagnosis, LGG versus HGG and IDH status beyond age and sex, and do deep
+        features add to hand-crafted radiomics?
+  \item How much would molecular and surgical inputs inflate the results?
+  \item How reliable is a ranking of models on a 25-patient test split, and what do segmentation errors cost
+        downstream?
+\end{enumerate}
+Our contributions are:
+\begin{itemize}
+  \item a segmentation benchmark under one matched budget, with paired statistics;
+  \item an input ladder evaluated both end to end and by late fusion with repeated CV and pre-specified tests;
+  \item a labelled leakage reference that quantifies how molecular inputs produce near-perfect numbers;
+  \item analyses of split-to-split variance and of how segmentation errors propagate to classification;
+  \item an open, resumable implementation.
+\end{itemize}
+
+% ---------------------------------------------------------------------------------------------------------
+\section{Materials and methods}
+
+\subsection{Data}
+We used the UCSF Preoperative Diffuse Glioma MRI dataset (UCSF-PDGM)~\cite{calabrese2022ucsf}: 501 adults with
+histopathologically confirmed WHO grade 2--4 diffuse glioma, 3~T pre-operative MRI, expert tumour segmentations and
+clinical, molecular and survival metadata. We used only the T2-weighted sequence, which is part of every glioma
+protocol, to study what a single structural sequence carries. Segmentation used the 495 patients with a T2 volume
+and a segmentation \todo{state why the other 6 were excluded}. The target was the whole tumour, with all labelled
+compartments merged.
+
+The cohort is dominated by grade 4 (402 of 501 patients). Classification therefore used a grade-balanced
+162-patient sub-cohort: all 56 grade-2 and 43 grade-3 patients and 63 grade-4 patients, so 339 grade-4 patients
+were excluded. Its median age was 48 years (range 19--81), 38.9\% were female, and 81 tumours were IDH-mutant
+(Table~\ref{tab:cohort}). Targets were:
+\begin{itemize}
+  \item three-way WHO grade;
+  \item four-way WHO~2021 diagnosis: astrocytoma IDH-mutant, astrocytoma IDH-wildtype, glioblastoma IDH-wildtype, and
+        oligodendroglioma IDH-mutant and 1p/19q-codeleted;
+  \item LGG (grade 2--3) versus HGG (grade 4);
+  \item IDH status, in the late-fusion experiments only.
+\end{itemize}
+
+\begin{table}[t]
+\centering
+\caption{Classification cohort and its fixed split. The segmentation split (345/75/75 of 495 patients) contains it:
+every classification test patient is a segmentation test patient, and the same holds for validation and training.}
+\label{tab:cohort}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+ & Train & Validation & Test & Total \\
+\midrule
+Grade 2 & 38 & 9 & 9 & 56 \\
+Grade 3 & 31 & 6 & 6 & 43 \\
+Grade 4 & 43 & 10 & 10 & 63 \\
+\midrule
+Astrocytoma, IDH-mutant & 47 & 11 & 10 & 68 \\
+Astrocytoma, IDH-wildtype & 17 & 3 & 4 & 24 \\
+Glioblastoma, IDH-wildtype & 39 & 9 & 9 & 57 \\
+Oligodendroglioma, IDH-mutant, 1p/19q-codeleted & 9 & 2 & 2 & 13 \\
+\midrule
+Patients & 112 & 25 & 25 & 162 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Splits and leakage controls}
+One patient-level split was created before any training and used by every stage. The 162-patient cohort was split
+70/15/15 with stratification on grade and diagnosis (112/25/25). The 495 segmentation patients were split 345/75/75
+so that classification test patients are segmentation test patients, and likewise for validation and training.
+Self-supervised pretraining used only the segmentation training and validation patients. No model, selector or
+scaler saw a classification test patient before the final evaluation.
+
+``Clinical'' input means variables known before surgery: age, sex, and whether a biopsy preceded the MRI.
+IDH, 1p/19q, MGMT and extent of resection come from tissue or surgery, and IDH and 1p/19q define the WHO~2021
+diagnosis. They were excluded from all main models. They appear only in rows labelled \emph{leaky reference}, which
+add them to the inputs (the \emph{full clinical vector}) to quantify how much such variables inflate performance.
+
+\subsection{Preprocessing}
+Volumes were reoriented to RAS, resampled to 1~mm isotropic spacing and z-score normalised per volume over non-zero
+voxels. Networks worked on $96^3$ patches. Metrics were computed on the 1~mm grid.
+
+\subsection{Segmentation}
+\label{sec:seg}
+We compared:
+\begin{itemize}
+  \item SwinUNETR~\cite{hatamizadeh2022swinunetr}, trained from scratch and initialised from self-supervised
+        pretraining;
+  \item SegResNet~\cite{myronenko2019segresnet};
+  \item a 3D residual U-Net~\cite{cicek2016unet3d} with channels 32--320, and, as a configuration sensitivity
+        analysis, the same U-Net in a narrower configuration (channels 16--256, dropout 0.1);
+  \item SegMamba~\cite{xing2024segmamba,gu2023mamba}.
+\end{itemize}
+All were implemented in MONAI~\cite{cardoso2022monai} and trained with one budget:
+\begin{itemize}
+  \item Dice plus cross-entropy loss;
+  \item AdamW~\cite{loshchilov2019adamw} with learning rate $10^{-4}$ and weight decay $10^{-5}$, 3 warm-up epochs then
+        cosine decay, for 100 epochs;
+  \item batches of 2 volumes with 2 crops each, sampled 1:1 around tumour and background voxels;
+  \item mixed precision and gradient clipping at norm 1;
+  \item random flips, small affine transforms, Gaussian noise, intensity shift and scaling, and bias fields as
+        augmentation.
+\end{itemize}
+The checkpoint with the best validation Dice, evaluated every 5 epochs, was kept.
+
+Under the shared learning rate, SegMamba's validation Dice peaked at epoch 35 and then declined while its training
+loss kept falling. We therefore added one sensitivity run at half the learning rate ($5 \times 10^{-5}$). It was
+added after the main segmentation results were known, is reported as its own row, and is never the reference model
+in the statistical comparison.
+
+Inference used sliding windows ($96^3$, 50\% overlap, Gaussian weighting) and a 0.5 threshold. We report Dice, IoU,
+the 95th-percentile Hausdorff distance (HD95), the normalised surface distance at 1~mm
+(NSD)~\cite{nikolov2021nsd}, sensitivity and precision, on the raw predictions of every
+model~\cite{maierhein2024metrics}. Confidence intervals are 95\% percentile bootstrap intervals over patients
+(2,000 resamples)~\cite{efron1993bootstrap}. Every model was compared with the best model by Dice using two-sided
+paired Wilcoxon signed-rank tests~\cite{wilcoxon1945} on Dice and HD95, with Holm correction~\cite{holm1979}.
+
+\paragraph{Self-supervised pretraining.} The SwinUNETR encoder was pretrained for 50 epochs with four
+objectives~\cite{tang2022ssl}:
+\begin{itemize}
+  \item reconstruction of masked $16^3$ cubes (60\% masked, weight 1.0)~\cite{he2022mae};
+  \item prediction of a $k \times 90^\circ$ rotation (weight 0.5);
+  \item an InfoNCE contrastive loss between two augmented views (temperature 0.5, weight
+        1.0)~\cite{oord2018cpc,chen2020simclr};
+  \item an unmasked reconstruction (weight 0.1).
+\end{itemize}
+We used AdamW (learning rate $10^{-4}$) with gradient accumulation to an effective batch of 8.
+
+\subsection{Shared backbone, predicted masks and features}
+All classification stages share one segmentation backbone. We used SegMamba to test whether features from an
+encoder with long-range, state-space context add to radiomics. The backbone was fixed after the segmentation
+benchmark but before any classifier was trained, and it is not the best segmenter in Table~\ref{tab:seg}. Of its
+two runs, the one with the better validation Dice (learning rate $5 \times 10^{-5}$; 0.893 against 0.883) was
+chosen before its test result was known.
+
+Its predicted masks, reduced to their largest connected component, centre the evaluation crops and define the
+radiomics region for every classification patient. This cleanup step was chosen from validation HD95 before any
+classifier was trained.
+
+\paragraph{Radiomics.} 102 original-image features (first order, shape, GLCM, GLRLM, GLSZM, GLDM) were extracted with
+PyRadiomics~\cite{vangriethuysen2017pyradiomics} from the predicted masks (bin width 5, intensity normalisation,
+1~mm resampling). Thirty were kept by recursive feature elimination with a 50-tree random forest, fit on training data
+only.
+
+\paragraph{Deep features.} For late fusion we pooled SegMamba's encoder stages 2, 3 and 4 and its decoder features
+(192 + 384 + 768 + 48 = 1,392 values) with a masked mean inside the predicted tumour probability. The backbone was
+trained with tumour masks only, never with class labels, so these features can be cross-validated over the
+classification cohort without label leakage. It has, however, seen the images and masks of the classification
+training and validation patients during segmentation training.
+
+\subsection{End-to-end classifiers}
+\label{sec:e2e}
+The end-to-end model is a multi-task network on the SegMamba backbone, initialised from the segmentation model.
+\begin{itemize}
+  \item \emph{Segmentation head.} It stays trained (Dice plus cross-entropy, weight 1).
+  \item \emph{Tokens.} The stage-4 bottleneck and the decoder features are pooled with a masked mean weighted by the
+        head's own tumour probability. They are projected to 128-dimensional tokens, together with one token per
+        tabular input (clinical, radiomics).
+  \item \emph{Fusion.} The tokens are fused with learnable task tokens by a two-layer, four-head
+        transformer~\cite{vaswani2017attention}.
+  \item \emph{Training.} Random $96^3$ crops containing tumour, modality dropout (0.3), auxiliary per-token heads
+        (weight 0.3), and a focal loss ($\gamma = 2$)~\cite{lin2017focal} with balanced class weights (task weights:
+        grade 1.0, diagnosis 0.5).
+  \item \emph{Optimisation.} AdamW with learning rates $2 \times 10^{-4}$ for the heads and $10^{-5}$ for the
+        backbone, weight decay 0.05, 5 warm-up epochs, cosine decay, up to 100 epochs. The backbone was frozen for
+        the first 10 epochs.
+  \item \emph{Checkpoint.} Chosen on the exponentially smoothed (factor 0.6) validation negative log-likelihood of
+        the classification heads, with patience 25.
+  \item \emph{Inference.} Validation and test predictions average the probabilities over the 8 flips of the crop.
+        At test time the crop is centred on the predicted tumour.
+\end{itemize}
+
+The main comparison is a ladder of the same model in which only the inputs change: image only, image + clinical,
+and image + clinical + radiomics. The leaky reference adds the full clinical vector to the last two rungs. Four
+alternative designs complete the set:
+\begin{itemize}
+  \item \emph{cascade}: frozen backbone, whole-crop pooling, concatenation fusion;
+  \item \emph{multi-scale}: encoder stages 2--4 plus decoder, hard tumour mask;
+  \item \emph{Trinity}: cross-attention fusion over stages 1--3 with a supervised contrastive term~\cite{khosla2020supcon};
+  \item \emph{SegMamba-v3}: bottleneck pooled in the tumour core and in a peritumoral ring (5-voxel dilation), with
+        a dedicated LGG/HGG head.
+\end{itemize}
+The checkpoint selection, the test-time flips and the initial backbone freeze were fixed before any classifier was
+trained.
+
+For models without an LGG/HGG head, LGG versus HGG is derived from the grade head. $P(\text{grade 4})$ is the score
+for the AUC, and the call is HGG exactly when the grade head predicts grade 4. \emph{This rule was changed after the
+first test evaluation.} Originally the call was HGG only when $P(\text{grade 4}) > 0.5$. Under that rule three models
+called every test patient LGG despite LGG/HGG AUCs of 0.76--0.89, and a model could call a patient grade 4 and LGG at
+the same time. The change affects only LGG/HGG balanced accuracy; no AUC changed and nothing was retrained. We
+therefore treat the LGG/HGG AUC as the primary LGG/HGG metric, and the first evaluation's balanced accuracies are in
+the supplement.
+
+\subsection{Late fusion}
+Late fusion used repeated stratified 5-fold CV (10 repeats, 50 folds) over all 162 patients. Every imputer, scaler,
+selector and classifier was refit inside each training fold: RFE to 30 radiomics features, and an ANOVA top-32 of the
+deep features. The classifiers were:
+\begin{itemize}
+  \item logistic regression ($C = 0.5$);
+  \item a random forest;
+  \item a one-hidden-layer MLP (64 units);
+  \item XGBoost~\cite{chen2016xgboost} (200 trees, depth 4, learning rate 0.05, balanced sample weights).
+\end{itemize}
+All were implemented with scikit-learn~\cite{pedregosa2011sklearn}, with hyperparameters fixed before any result. A
+majority-class floor was always included.
+
+The feature sets mirror the ladder: age + sex, clinical, radiomics, clinical + radiomics, image (deep features),
+image + clinical, image + clinical + radiomics, and four leaky references. XGBoost is the pre-specified primary model,
+and logistic regression is reported alongside. As a fully clean confirmation, every model was also fit once on
+training + validation and scored on the 25 test patients. XGBoost feature attributions were computed with
+TreeSHAP~\cite{lundberg2017shap,lundberg2020tree}.
+
+\subsection{Explanations and classification metrics}
+For the first seed of each end-to-end classifier we recorded:
+\begin{itemize}
+  \item the attention of the task tokens over the input tokens;
+  \item the drop in true-class probability when each token is zeroed (token occlusion);
+  \item Grad-CAM~\cite{selvaraju2017gradcam} maps of the pooled feature maps on the unflipped crop.
+\end{itemize}
+Classification is reported as balanced accuracy, macro F1 and macro one-versus-rest AUC, with 95\% patient-level
+bootstrap CIs (2,000 resamples; the hard calls are resampled with the probabilities).
+
+\subsection{Statistical comparisons}
+\label{sec:stats}
+The comparisons below were fixed before any of them was tested, and all are reported.
+\begin{itemize}
+  \item \emph{End-to-end models, on the test patients.} Each rung of the ladder was compared with the rung below
+        (clinical token, radiomics token), and each alternative design with the ladder model that has the same
+        inputs. Differences in AUC were tested with DeLong's test~\cite{delong1988} for LGG versus HGG and with a
+        paired bootstrap of the macro AUC (2,000 patient resamples) for grade and diagnosis, with Holm correction
+        within each task.
+  \item \emph{Late fusion, over the CV folds.} For XGBoost and logistic regression we compared clinical + radiomics
+        with clinical, image + clinical with clinical, image + clinical + radiomics with clinical + radiomics, and
+        radiomics with image. The 50 folds are identical for every feature set and model of a task, so the fold
+        scores pair up. Because folds share most of their training data, we used the corrected resampled
+        $t$-test~\cite{nadeau2003inference,bouckaert2004replicability}, which inflates the variance of the mean
+        fold difference by the test/train size ratio, with Holm correction within each task and model.
+\end{itemize}
+
+\paragraph{Ground-truth-mask analysis.} To measure what segmentation errors cost, the same trained models were
+scored with the expert masks in place of the predicted ones. For the end-to-end classifiers the masks set the crop
+centre and the radiomics; inside the network the tumour weighting remains the model's own segmentation head. For
+late fusion, the radiomics and deep features were recomputed from the expert masks, and the fold pipelines were
+refit on the same folds. Nothing was retrained or reselected, and the same tests compare the two mask sources.
+
+\subsection{Further analyses}
+\begin{itemize}
+  \item \emph{Segmentation against tumour size.} Spearman correlation between per-patient Dice and ground-truth
+        volume, and Dice per volume tertile of the 75 test patients.
+  \item \emph{Calibration and clinical usefulness.} Multi-class Brier score~\cite{brier1950} and expected
+        calibration error (ECE, 10 bins)~\cite{guo2017calibration}, for the end-to-end models on the test patients
+        and for late fusion on out-of-fold predictions of all 162 patients (one 5-fold pass). For LGG versus HGG and
+        IDH we also drew reliability diagrams and decision curves~\cite{vickers2006decision}. All models were trained
+        with balanced class weights, which shifts probabilities towards the rarer classes by design.
+  \item \emph{Learning curves.} Late fusion was fit on stratified 25, 50, 75 and 100\% subsamples of each training
+        fold (5-fold CV, 4 repeats) and scored on the full test folds. Every feature set saw the same subsamples.
+  \item \emph{Radiomics stability.} Agreement of each radiomics feature between predicted and expert masks, as
+        ICC(2,1)~\cite{shrout1979icc,koo2016icc} and Lin's concordance correlation~\cite{lin1989ccc}. Only the 50
+        classification validation and test patients count, because the backbone's predicted masks are nearly
+        perfect on its own training patients.
+\end{itemize}
+
+% ---------------------------------------------------------------------------------------------------------
+\section{Results}
+\todo{All end-to-end and segmentation results are one seed (42). Replace with mean $\pm$ SD over seeds 42--44 once
+those runs finish; the tables are regenerated by \texttt{scripts/aggregate\_results.py}.}
+
+\subsection{Segmentation}
+\begin{table}[t]
+\centering
+\caption{Whole-tumour segmentation on the 75 test patients (one seed). Dice and HD95 with 95\% bootstrap CIs.
+$p$: paired Wilcoxon against SegResNet, Holm-corrected. Train: hours on one A100. Inference: seconds per volume.
+$^\dagger$Sensitivity run added after the main results (Section~\ref{sec:seg}). $^\ast$Training time partly
+estimated from log timestamps.}
+\label{tab:seg}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+Model & Dice & HD95 (mm) & NSD & $p_\text{Dice}$ & $p_\text{HD95}$ & Params (M) & Train (h) & Infer. (s) \\
+\midrule
+SegResNet & \textbf{0.865}\ci{0.828}{0.899} & \textbf{11.7}\ci{7.5}{16.4} & \textbf{0.715} & -- & -- & 4.7 & 0.9 & 0.57 \\
+SegMamba, lr $5\times10^{-5}$ $^\dagger$ & 0.847\ci{0.797}{0.890} & 22.3\ci{12.8}{32.8} & 0.704 & 0.84 & 0.007 & 67.4 & 3.2 & 2.09 \\
+SwinUNETR & 0.843\ci{0.791}{0.886} & 23.3\ci{15.5}{31.3} & 0.686 & 0.22 & 0.002 & 62.2 & 2.7$^\ast$ & 1.55 \\
+SwinUNETR + SSL & 0.842\ci{0.797}{0.883} & 20.1\ci{12.3}{28.2} & 0.678 & 0.004 & 0.001 & 62.2 & 2.8$^\ast$ & 1.65 \\
+3D U-Net & 0.838\ci{0.793}{0.879} & 26.3\ci{18.2}{35.4} & 0.654 & $<10^{-6}$ & $<10^{-6}$ & 12.9 & 1.2 & 0.15 \\
+SegMamba & 0.832\ci{0.781}{0.877} & 14.2\ci{9.7}{19.2} & 0.670 & $<10^{-3}$ & 0.005 & 67.4 & 3.2 & 2.09 \\
+3D U-Net, narrow config. & 0.728\ci{0.675}{0.781} & 131.2\ci{122.2}{139.3} & 0.406 & $<10^{-12}$ & $<10^{-12}$ & 4.8 & 1.2 & 0.14 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+SegResNet had the highest mean Dice and the lowest HD95 (Table~\ref{tab:seg}, Fig.~\ref{fig:seg}). Compared with it:
+\begin{itemize}
+  \item SegMamba at the lower learning rate and SwinUNETR from scratch were not significantly different in Dice
+        ($p = 0.84$ and $0.22$) but had significantly larger HD95;
+  \item SegMamba at the shared learning rate was worse on both.
+\end{itemize}
+Median Dice was 0.91--0.93 for every model except the narrow U-Net configuration (0.815). The means are pulled down
+by three to six patients per model with Dice below 0.5. Two patients fail for every model: a 1.6~mL tumour that no
+model detects, and a glioblastoma on which every model labels mostly the wrong tissue (precision 0.04--0.18).
+
+Self-supervised pretraining did not help. SwinUNETR + SSL against SwinUNETR from scratch differed by $-0.001$ Dice
+($p = 0.08$, unadjusted) and $-3.2$~mm HD95 ($p = 0.27$). U-Net results depended strongly on configuration: under the
+same budget the wider U-Net gained 0.110 Dice and lost 105~mm HD95 against the narrow one ($p < 10^{-12}$ for both).
+The narrow configuration's HD95 of 131~mm comes from scattered false positives across the brain (Fig.~\ref{fig:seg}b).
+SegResNet was also the smallest and among the fastest models (4.7~M parameters and 0.57~s per volume, against
+67.4~M and 2.09~s for SegMamba).
+
+Failures concentrated in small tumours (Fig.~\ref{fig:volume}). Dice rose with tumour volume for every model
+(Spearman $\rho$ 0.45--0.56, and 0.74 for the narrow U-Net; all $p < 10^{-4}$). In the smallest third of the test
+tumours (below 50~mL), median Dice was 0.81--0.84 (narrow U-Net 0.62), against 0.93--0.94 in the largest third
+(above 103~mL). Of the 40 failures with Dice below 0.5 across the seven models, 38 were in the smallest third.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{segmentation_dice_vs_volume.png}
+\caption{Per-patient test Dice against ground-truth tumour volume (log scale), one panel per model. Dashed line:
+Dice 0.5.}
+\label{fig:volume}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{\textwidth}\centering
+  \includegraphics[width=\textwidth]{segmentation_dice.png}
+  \caption{Per-patient test Dice (green triangle: mean).}
+\end{subfigure}
+\begin{subfigure}{\textwidth}\centering
+  \includegraphics[width=\textwidth]{segmentation_cases.png}
+  \caption{Best, median and worst test case of SegResNet, for every model (green: ground truth, red: prediction).}
+\end{subfigure}
+\caption{Whole-tumour segmentation on the 75 test patients.}
+\label{fig:seg}
+\end{figure}
+
+\subsection{What leaky inputs would explain}
+With the full clinical vector and no imaging at all, XGBoost reached a CV diagnosis AUC of $0.929 \pm 0.022$
+(logistic regression $0.949 \pm 0.023$) and IDH AUC 1.000 (Table~\ref{tab:kfold}). End to end, the leaky reference
+with radiomics reached a test diagnosis balanced accuracy of 0.944 (0.857--1.000) and AUC 0.975
+(Table~\ref{tab:cls}). Such numbers therefore need no imaging, and every comparison below excludes these variables.
+
+\subsection{End-to-end classification}
+\begin{table}[t]
+\centering
+\caption{End-to-end classifiers on the 25 test patients (one seed). Balanced accuracy (BA) and macro AUC with 95\%
+bootstrap CIs. Chance: BA 0.333 (grade) and 0.250 (diagnosis); AUC 0.5. LGG/HGG for all models except SegMamba-v3
+is derived from the grade head (Section~\ref{sec:e2e}).}
+\label{tab:cls}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+ & \multicolumn{2}{c}{Grade (3-way)} & \multicolumn{2}{c}{Diagnosis (4-way)} & LGG vs HGG \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-6}
+Model & BA & AUC & BA & AUC & AUC \\
+\midrule
+\multicolumn{6}{l}{\emph{Main ladder (same model, inputs change)}} \\
+Image only & 0.530\ci{0.40}{0.64} & 0.761\ci{0.63}{0.87} & 0.364\ci{0.27}{0.54} & 0.799\ci{0.66}{0.93} & 0.887\ci{0.72}{1.00} \\
+Image + clinical & 0.456\ci{0.31}{0.60} & 0.751\ci{0.58}{0.90} & 0.457\ci{0.32}{0.70} & 0.869\ci{0.74}{0.98} & 0.853\ci{0.66}{1.00} \\
+Image + clinical + radiomics & 0.548\ci{0.34}{0.75} & 0.808\ci{0.65}{0.93} & 0.744\ci{0.55}{0.94} & 0.916\ci{0.84}{0.99} & 0.867\ci{0.68}{1.00} \\
+\midrule
+\multicolumn{6}{l}{\emph{Alternative designs (image + clinical, + radiomics where marked)}} \\
+Cascade & 0.493\ci{0.35}{0.63} & 0.674\ci{0.53}{0.81} & 0.419\ci{0.33}{0.62} & 0.857\ci{0.77}{0.95} & 0.793\ci{0.59}{0.96} \\
+Multi-scale & 0.563\ci{0.44}{0.67} & 0.708\ci{0.54}{0.86} & 0.394\ci{0.30}{0.59} & 0.804\ci{0.65}{0.95} & 0.873\ci{0.69}{1.00} \\
+Trinity (+ radiomics) & 0.526\ci{0.40}{0.64} & 0.739\ci{0.56}{0.89} & 0.369\ci{0.26}{0.56} & 0.788\ci{0.62}{0.94} & 0.760\ci{0.50}{0.97} \\
+SegMamba-v3 (+ radiomics) & 0.567\ci{0.38}{0.77} & 0.766\ci{0.59}{0.91} & 0.757\ci{0.55}{0.90} & 0.892\ci{0.80}{0.98} & 0.840\ci{0.63}{1.00} \\
+\midrule
+\multicolumn{6}{l}{\emph{Leaky reference (uses post-operative molecular and surgical data)}} \\
+Image + full clinical & 0.563\ci{0.37}{0.76} & 0.841\ci{0.72}{0.95} & 0.882\ci{0.71}{1.00} & 0.969\ci{0.91}{1.00} & 0.947\ci{0.84}{1.00} \\
+Image + full clinical + radiomics & 0.622\ci{0.42}{0.82} & 0.870\ci{0.74}{0.97} & 0.944\ci{0.86}{1.00} & 0.975\ci{0.93}{1.00} & 0.927\ci{0.78}{1.00} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+On the test split, adding radiomics to image + clinical raised diagnosis balanced accuracy from 0.457 to 0.744 and AUC
+from 0.869 to 0.916 (Table~\ref{tab:cls}). The AUC difference was not significant: $+0.047$ (95\% CI $-0.012$ to
+$0.113$; $p = 0.14$, Holm-adjusted 0.57). Adding the clinical token gave $+0.070$ for diagnosis ($-0.010$ to
+$0.152$; $p = 0.10$). Among the pre-specified comparisons (Section~\ref{sec:stats}), none was significant after Holm
+correction for any task. The largest difference was the Trinity design's deficit against the ladder model with the
+same inputs (diagnosis $-0.127$, $-0.238$ to $-0.017$; $p = 0.019$, adjusted 0.11).
+\todo{supplement table: \texttt{paper\_tables/classification\_tests}; update with three seeds.}
+
+The weaker models' balanced accuracies are low despite reasonable AUCs because their calls collapse onto the two
+large classes (Fig.~\ref{fig:cm}):
+\begin{itemize}
+  \item Image only, image + clinical, cascade, multi-scale and Trinity predicted grade 3 at most twice, astrocytoma
+        IDH-wildtype at most once, and oligodendroglioma never.
+  \item Image only had a mean top-class probability of 0.36 for diagnosis (uniform: 0.25), the same for correct and
+        incorrect calls.
+  \item The image + clinical + radiomics model predicted all four classes: astrocytoma IDH-wildtype 4/4,
+        glioblastoma 7/9, astrocytoma IDH-mutant 7/10, oligodendroglioma 1/2.
+  \item SegMamba-v3's balanced accuracy is inflated by over-predicting the rare oligodendroglioma class (9 calls
+        for 2 patients; accuracy 0.68).
+\end{itemize}
+None of the alternative designs clearly improved on the plain ladder; all differences lie well inside the confidence
+intervals.
+
+The probabilities were poorly calibrated, as expected with balanced class weights. Diagnosis Brier scores were 0.65
+for image only (uniform probabilities score 0.75), 0.46 for image + clinical + radiomics and 0.24 for the leaky
+reference with radiomics, with ECEs of 0.20--0.31. \todo{supplement table: \texttt{paper\_tables/calibration\_end\_to\_end}.}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.32\textwidth}\centering
+  \includegraphics[width=\textwidth]{cls_image_only_diagnosis_confusion.png}
+  \caption{Image only.}
+\end{subfigure}
+\begin{subfigure}{0.32\textwidth}\centering
+  \includegraphics[width=\textwidth]{cls_image_clinical_radiomics_diagnosis_confusion.png}
+  \caption{Image + clinical + radiomics.}
+\end{subfigure}
+\begin{subfigure}{0.32\textwidth}\centering
+  \includegraphics[width=\textwidth]{cls_leaky_reference_radiomics_diagnosis_confusion.png}
+  \caption{Leaky reference + radiomics.}
+\end{subfigure}
+\caption{Test confusion matrices for four-way diagnosis (rows: truth). The image-only model collapses onto
+astrocytoma IDH-mutant and glioblastoma; the leaky reference is nearly perfect because its inputs encode the label.}
+\label{fig:cm}
+\end{figure}
+
+\subsection{Late fusion and what imaging adds}
+\begin{table}[t]
+\centering
+\caption{Late fusion, repeated stratified 5-fold CV over the 162 patients (mean $\pm$ SD of macro AUC over 50 folds),
+XGBoost. Majority class: 0.500 for every task. ``Image'' = label-free deep features of the segmentation backbone.}
+\label{tab:kfold}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Features & Grade & Diagnosis & LGG vs HGG & IDH \\
+\midrule
+Age + sex & $0.570 \pm 0.048$ & $0.650 \pm 0.044$ & $0.660 \pm 0.082$ & $0.847 \pm 0.056$ \\
+Clinical & $0.562 \pm 0.050$ & $0.648 \pm 0.043$ & $0.657 \pm 0.081$ & $0.837 \pm 0.056$ \\
+Radiomics & $0.742 \pm 0.061$ & $0.797 \pm 0.061$ & $0.793 \pm 0.077$ & $0.821 \pm 0.059$ \\
+Clinical + radiomics & $\mathbf{0.765 \pm 0.059}$ & $\mathbf{0.836 \pm 0.053}$ & $\mathbf{0.828 \pm 0.059}$ & $0.898 \pm 0.045$ \\
+Image & $0.692 \pm 0.056$ & $0.751 \pm 0.049$ & $0.783 \pm 0.086$ & $0.818 \pm 0.067$ \\
+Image + clinical & $0.701 \pm 0.059$ & $0.803 \pm 0.050$ & $0.797 \pm 0.074$ & $0.905 \pm 0.047$ \\
+Image + clinical + radiomics & $0.747 \pm 0.051$ & $0.835 \pm 0.047$ & $0.823 \pm 0.075$ & $\mathbf{0.906 \pm 0.051}$ \\
+\midrule
+\multicolumn{5}{l}{\emph{Leaky reference (post-operative molecular and surgical data)}} \\
+Full clinical vector & $0.738 \pm 0.055$ & $0.929 \pm 0.022$ & $0.863 \pm 0.036$ & $1.000 \pm 0.000$ \\
+Molecular + surgical & $0.741 \pm 0.058$ & $0.946 \pm 0.025$ & $0.905 \pm 0.039$ & $1.000 \pm 0.000$ \\
+Image + full clinical & $0.799 \pm 0.052$ & $0.945 \pm 0.024$ & $0.904 \pm 0.045$ & $1.000 \pm 0.000$ \\
+Image + full clinical + radiomics & $0.808 \pm 0.048$ & $0.957 \pm 0.019$ & $0.910 \pm 0.047$ & $1.000 \pm 0.000$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Repeated CV gives the more reliable comparison (Table~\ref{tab:kfold}). Hand-crafted radiomics carried most of the
+imaging signal: radiomics alone beat the deep features for grade, diagnosis and LGG/HGG. Adding the deep features to
+clinical + radiomics did not help (diagnosis $0.835$ against $0.836$; grade $0.747$ against $0.765$; LGG/HGG $0.823$
+against $0.828$). \todo{corrected $t$-test results from \texttt{paper\_tables/kfold\_tests} once \texttt{kfold}
+has rerun with per-fold scores.} Logistic regression gave the same picture (diagnosis: clinical + radiomics $0.831$,
+image + clinical + radiomics $0.810$).
+
+For IDH status, age and sex alone reached $0.847$ (XGBoost) and $0.895$ (logistic regression). The best imaging model
+added at most 0.06 AUC (0.906; logistic regression image + clinical also 0.906).
+
+\todo{learning curves (\texttt{paper\_tables/learning\_curves}, \texttt{learning\_curve\_<task>.png}): do the deep
+features close the gap to radiomics as the training set grows? Calibration and decision curves of late fusion
+(\texttt{calibration\_late\_fusion}, \texttt{calibration\_<task>.png}, \texttt{decision\_curve\_<task>.png}) for
+LGG/HGG and IDH, against treating all or none.}
+
+The one-shot hold-out on the 25 test patients agreed within its wide intervals:
+\begin{itemize}
+  \item XGBoost diagnosis AUC: clinical + radiomics 0.787 [0.63, 0.96], image + clinical + radiomics 0.848 [0.73, 0.94];
+  \item IDH AUC: age + sex 0.926 [0.76, 1.00].
+\end{itemize}
+\todo{full hold-out table in the supplement.}
+
+TreeSHAP on the image + clinical + radiomics XGBoost ranked age first for diagnosis, ahead of any deep or radiomics
+feature (Fig.~\ref{fig:shap}). The leading radiomics features were the 10th-percentile intensity and GLCM sum
+entropy, a measure of texture heterogeneity. The 32 selected deep features and the 30 selected radiomics features
+contributed similarly, in total (1.81 and 1.61) and per feature (0.057 and 0.054), against 0.36 for age alone. XGBoost
+thus uses the deep features when they are offered, yet CV shows no gain from adding them, so they appear to be
+largely redundant with the radiomics rather than complementary.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\textwidth]{kfold_shap_diagnosis_image_clinical_radiomics_top15.png}
+\caption{Top-15 TreeSHAP features for four-way diagnosis (XGBoost, image + clinical + radiomics, fit on training +
+validation). \texttt{num\_\_}: clinical, \texttt{deep\_\_}: deep features, \texttt{rad\_\_}: radiomics.}
+\label{fig:shap}
+\end{figure}
+
+\subsection{How reliable is a 25-patient test split?}
+\begin{table}[t]
+\centering
+\caption{Validation against test performance of the selected checkpoints, for diagnosis (macro AUC and balanced
+accuracy). Both splits have 25 patients, the same class mix, and the same transforms and predicted-mask crops.}
+\label{tab:valtest}
+\small
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{AUC} & \multicolumn{2}{c}{Balanced accuracy} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Model & Validation & Test & Validation & Test \\
+\midrule
+Image only & 0.381 & 0.799 & 0.232 & 0.364 \\
+Image + clinical & 0.671 & 0.869 & 0.389 & 0.457 \\
+Image + clinical + radiomics & 0.619 & 0.916 & 0.288 & 0.744 \\
+SegMamba-v3 & 0.755 & 0.892 & 0.562 & 0.757 \\
+Leaky reference & 0.870 & 0.969 & 0.444 & 0.882 \\
+Leaky reference + radiomics & 0.918 & 0.975 & 0.708 & 0.944 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Every end-to-end model scored much lower on the validation split than on the test split (Table~\ref{tab:valtest}).
+The two splits have nearly the same composition: 9 glioblastomas, 10--11 IDH-mutant astrocytomas, 3--4
+IDH-wildtype astrocytomas and 2 oligodendrogliomas each, with median ages of 52 and 47 years. Their processing is
+identical, and the checkpoint was selected on validation loss, which should favour validation, not test.
+
+The gap is therefore split-to-split variance. The test split is probably on the easy side, consistent with the
+late-fusion hold-out mostly scoring at or above CV. For the best end-to-end model the validation diagnosis balanced
+accuracy at the selected epoch was 0.29, barely above chance, against 0.74 on test. A ranking of models by one such
+split is not reliable~\cite{varoquaux2018cv}.
+
+\subsection{Error analysis}
+High-grade recall was 0.7--0.8 for every model because the same patients were missed. Two glioblastomas were called
+low-grade by all nine end-to-end models, including the leaky references:
+\begin{itemize}
+  \item In one (38 years, biopsy only, 3.7~mL tumour), the backbone's predicted mask was a 150-voxel false positive with
+        Dice 0, so both the crop and the radiomics came from the wrong region.
+  \item The other was segmented correctly, but its T2 appearance was that of a lower-grade tumour. Knowing it was
+        IDH-wildtype, the leaky models called it an IDH-wildtype astrocytoma.
+\end{itemize}
+A grade-4 IDH-mutant astrocytoma (29 years) received the correct diagnosis from eight of nine models, but six of the
+nine called it low grade.
+
+Across the 25 classification test patients, the backbone missed three tumours completely (Dice 0; tumour volumes
+1.6--3.7~mL) and over-segmented a fourth by a factor of 2.5. About 16\% of the classifier inputs thus rested on wrong
+masks. Training patients did not show this (median Dice 0.935), because the backbone had been trained on them.
+\todo{ground-truth-mask analysis (\texttt{paper\_tables/classification\_oracle}, \texttt{kfold\_oracle}): how much
+of the gap these patients and the mask quality explain, end to end and in late fusion. Radiomics stability
+(\texttt{radiomics\_stability}): which feature classes survive segmentation errors.}
+
+\subsection{Explanations}
+Token occlusion in the image + clinical + radiomics model showed the stage-4 image token mattering most for diagnosis
+(mean drop in true-class probability 0.089, SD 0.146 across patients), ahead of clinical (0.034) and radiomics
+(0.016). Removing the decoder token changed nothing (0.0001). Fusion attention agreed: of the diagnosis token's
+attention, stage 4 took 0.39, radiomics 0.18, clinical 0.15 and the decoder 0.12.
+
+Grad-CAM maps of stage 4 were coarse. In glioblastomas they lay in the heterogeneous, necrotic-looking core
+(Fig.~\ref{fig:cam}), but in other patients they sat on the tumour border or outside the tumour. Decoder maps were
+empty, copied the tumour mask or its complement, consistent with the classifier ignoring that token. We read these
+maps as qualitative only~\cite{adebayo2018sanity} and make no claim that the classifier attends to the tumour.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\textwidth]{explain/cls_image_clinical_radiomics_gradcam_panel_diagnosis.png}
+\caption{Grad-CAM of the image + clinical + radiomics model for diagnosis: per class, the most confidently correct
+test patient (for a class with no correct call, its most probable patient), axial slice through the tumour.
+\todo{regenerate after the Colab rerun of \texttt{gradcam\_panel} (calls now flip-averaged as in the metrics);
+consider dropping the decoder column.}}
+\label{fig:cam}
+\end{figure}
+
+% ---------------------------------------------------------------------------------------------------------
+\section{Discussion}
+
+\paragraph{Segmentation.} The convolutional SegResNet was the best or tied model on T2, and SegMamba and SwinUNETR
+were not better. This agrees with recent evidence that well-configured CNNs remain hard to beat when budgets are
+matched~\cite{isensee2021nnunet,isensee2024revisited}. Self-supervised pretraining of SwinUNETR on 345 training
+volumes gave no measurable gain. U-Net results depended strongly on configuration, so a weak baseline can make an
+architecture look better than it is.
+
+\paragraph{Leakage.} Near-perfect diagnosis results follow from the molecular and surgical inputs alone. This is
+expected: IDH and 1p/19q define three of the four WHO~2021 classes. Inputs that are part of the label definition, or
+only known after surgery, have no place in a model that claims to predict from pre-operative
+MRI~\cite{kapoor2023leakage}. Where they are used, they should be reported as such.
+
+\paragraph{What imaging adds.} Without leakage, T2 imaging clearly carries information about diagnosis and grade
+beyond age and sex (XGBoost diagnosis CV AUC 0.84 against 0.65). Hand-crafted radiomics captured nearly all of it,
+and deep features from the segmentation backbone added nothing on top. This is consistent with tree ensembles on
+engineered features being strong on small tabular problems~\cite{grinsztajn2022tree}. It is not evidence that
+decoupled pipelines are inherently superior: the end-to-end model with radiomics was competitive on the test split.
+For IDH, age alone is a strong baseline because IDH-wildtype glioblastoma patients are older, and any radiogenomic
+claim should be measured against it.
+
+\paragraph{Evaluation.} With 25 test patients a balanced-accuracy CI spans about $\pm 0.2$, and our validation and
+test splits, drawn from the same distribution, disagreed by up to 0.42 AUC. Single-split results at this size are
+illustrative. Model comparisons need repeated CV, several seeds, and preferably an external
+cohort~\cite{varoquaux2018cv,varoquaux2022failures}. On our test split, no pre-specified difference between the
+end-to-end models was significant after correction, including the radiomics token that seemed to lift diagnosis
+balanced accuracy by 0.29.
+
+\paragraph{Recommendations.} From this study we suggest the following for small-cohort glioma work:
+\begin{enumerate}
+  \item Exclude any input that defines or follows from the label, and report it only as a labelled reference.
+  \item Fix one patient-level split shared by all stages, with the classification test set held out of pretraining
+        and segmentation training.
+  \item Fit every selector and scaler inside the training folds.
+  \item Always report no-imaging baselines (majority, age + sex).
+  \item Report CIs and paired tests, and do not rank models whose differences are not significant.
+  \item Check that each model actually uses its inputs. Silent failures, such as feature tokens that are all zeros
+        or a pretrained checkpoint that fails to load, are easy to miss in multi-stage pipelines.
+\end{enumerate}
+
+\paragraph{Limitations.}
+\begin{itemize}
+  \item The data come from a single centre and use T2 only. Enhancement and necrosis are better seen on
+        post-contrast T1, which likely explains part of the missed glioblastomas.
+  \item The balanced cohort does not reflect clinical prevalence.
+  \item End-to-end and segmentation results are from one seed \todo{update}.
+  \item The shared backbone was chosen after the segmentation benchmark and saw the classification training and
+        validation images. It gives near-perfect masks on its own training patients but not on new ones, so
+        classifier training crops and radiomics are cleaner for training than for test patients.
+  \item One scoring rule (the derived LGG/HGG call) was changed after the first test evaluation. We report AUC as
+        primary and the original values in the supplement.
+  \item Grad-CAM was assessed qualitatively.
+  \item There is no external validation. BraTS~\cite{menze2015brats,baid2021brats} overlaps with UCSF-PDGM; the
+        Erasmus Glioma Database~\cite{vandervoort2021egd} would be a suitable external test set.
+\end{itemize}
+
+% ---------------------------------------------------------------------------------------------------------
+\section{Conclusion}
+In a leakage-controlled benchmark on T2-weighted MRI:
+\begin{itemize}
+  \item a convolutional segmenter was at least as good as state-space and transformer models, and self-supervised
+        pretraining did not help;
+  \item near-perfect diagnosis accuracy was reachable only with molecular inputs that define the label;
+  \item the imaging signal for grade and diagnosis was captured by hand-crafted radiomics, and deep features added
+        nothing beyond it;
+  \item a single 25-patient split was too variable to rank models.
+\end{itemize}
+We release the resumable pipeline so that these checks can be applied to other small-cohort studies.
+
+\section*{Code and data availability}
+Code, configurations and the experiment protocol: \url{https://github.com/kkoutsikos/glioma-mtl}. UCSF-PDGM is
+publicly available~\cite{calabrese2022ucsf}. \todo{archive a tagged release (e.g.\ Zenodo DOI) and the split file.}
+
+\section*{Acknowledgements}
+\todo{supervisor, advisors, compute. Decide whether to disclose that this work builds on the first author's
+postgraduate thesis~\cite{koutsikos2026thesis}; many journals ask authors to declare overlap with a thesis.}
+
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+% ---------------------------------------------------------------------------------------------------------
+\appendix
+\section{Supplementary material}
+
+\paragraph{First evaluation of the derived LGG/HGG call.} Under the original rule (HGG only when
+$P(\text{grade 4}) > 0.5$), the test LGG/HGG balanced accuracies were: image only 0.500, image + clinical 0.850,
+image + clinical + radiomics 0.850, leaky reference 0.817, leaky reference + radiomics 0.850, cascade 0.767,
+multi-scale 0.500, Trinity 0.500. Under the current rule they are 0.817, 0.783, 0.750, 0.833, 0.850, 0.717, 0.833 and
+0.833. SegMamba-v3 has its own head (0.783) and is unaffected.
+
+\todo{Full tables from \texttt{paper\_tables/}: all four late-fusion classifiers (CV and hold-out), macro F1 and
+accuracy, the comparison tests and the ground-truth-mask analysis, ROC curves, training curves, per-patient
+segmentation results.}
+
+\end{document}

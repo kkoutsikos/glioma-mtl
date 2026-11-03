@@ -9,6 +9,12 @@ segmentation backbone (``scripts/extract_deep_features.py``). Every imputer / sc
 (radiomics: RFE with a random forest or ANOVA, ``radiomics.select``; deep features: ANOVA) sits inside the
 pipeline, so it is refit on each training fold.
 
+Writes ``cv_results.csv`` (mean ± SD over folds), ``cv_folds.csv`` (every fold's score; the folds are the
+same for every feature set and model of a task, so scores can be compared fold by fold) and
+``oof_predictions.csv`` (one out-of-fold probability per patient from a single 5-fold pass, for calibration).
+``--learning-curve`` instead fits each pipeline on stratified fractions of every training fold and scores it on
+the full test fold (``learning_curve`` in the config), writing ``learning_curves.csv``: does any feature set
+keep improving with more patients?
 ``--holdout`` also fits each pipeline once on classification train+val and evaluates it on the
 classification test split, which no model in the pipeline has seen. Feature sets marked
 ``(leaky reference)`` use tissue- or surgery-derived variables; they are context, not a prediction model.
@@ -31,7 +37,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import RepeatedStratifiedKFold, cross_validate
+from sklearn.model_selection import (RepeatedStratifiedKFold, StratifiedKFold, cross_val_predict, cross_validate,
+                                     train_test_split)
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -40,7 +47,7 @@ from sklearn.utils.class_weight import compute_sample_weight
 from glioma_mtl.config import load_config
 from glioma_mtl.data import load_metadata, load_splits
 from glioma_mtl.data.metadata import TASKS, clinical_transformer_parts, feature_columns, normalize_patient_id
-from glioma_mtl.evaluation import classification_metrics
+from glioma_mtl.evaluation import classification_metrics, macro_auc
 from glioma_mtl.features import load_deep_features
 from glioma_mtl.radiomics import TopK, load_radiomics, make_selector
 
@@ -152,11 +159,53 @@ def tree_shap(pipe: Pipeline, X_test: pd.DataFrame, task: str, features: str) ->
              "mean_abs_shap": float(v)} for n, v in zip(names, mean_abs)]
 
 
+def _subsample(train_idx: np.ndarray, y: np.ndarray, fraction: float, seed: int) -> np.ndarray:
+    """A stratified ``fraction`` of a training fold (all of it at 1.0); unstratified if a class is too rare."""
+    if fraction >= 1:
+        return train_idx
+    try:
+        return train_test_split(train_idx, train_size=fraction, stratify=y[train_idx], random_state=seed)[0]
+    except ValueError:
+        return train_test_split(train_idx, train_size=fraction, random_state=seed)[0]
+
+
+def learning_curve_rows(task: str, X_by_set: dict, y: np.ndarray, n_classes: int, models: dict, cfg: dict,
+                        make_pipe) -> list[dict]:
+    """Macro AUC on the full test folds of pipelines fit on stratified fractions of each training fold.
+
+    Every feature set and model sees the same folds and the same subsample of a fold at a given fraction, so the
+    curves are paired. A fit that fails (e.g. XGBoost when a small subsample lacks a class) scores NaN.
+    """
+    lc = cfg.get("learning_curve") or {}
+    folds = RepeatedStratifiedKFold(n_splits=(cfg.get("cv") or {}).get("folds", 5), n_repeats=lc.get("repeats", 4),
+                                    random_state=cfg.get("seed", 42))
+    rows = []
+    for fold, (tr, te) in enumerate(folds.split(np.zeros(len(y)), y)):
+        for fraction in lc.get("fractions", [0.25, 0.5, 0.75, 1.0]):
+            part = _subsample(tr, y, fraction, seed=fold)
+            for fs_name, X in X_by_set.items():
+                for model_name, make_model in models.items():
+                    pipe = make_pipe(fs_name, make_model())
+                    kw = {"clf__sample_weight": compute_sample_weight("balanced", y[part])} if model_name == "xgboost" else {}
+                    try:
+                        pipe.fit(X.iloc[part], y[part], **kw)
+                        proba = np.zeros((len(te), n_classes))
+                        proba[:, pipe.classes_] = pipe.predict_proba(X.iloc[te])
+                        auc = macro_auc(y[te], proba)
+                    except ValueError:
+                        auc = np.nan
+                    rows.append({"task": task, "features": fs_name, "model": model_name, "fraction": fraction,
+                                 "n_train": len(part), "fold": fold, "macro_auc": auc})
+    return rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True)
     parser.add_argument("--set", nargs="*", default=[])
     parser.add_argument("--holdout", action="store_true", help="also fit on train+val and score the test split")
+    parser.add_argument("--learning-curve", action="store_true",
+                        help="only the learning curves (config: learning_curve), written to learning_curves.csv")
     parser.add_argument("--out-dir", default=None, help="default: <output_root>/kfold_cv")
     args = parser.parse_args()
     cfg = load_config(args.config, args.set)
@@ -194,11 +243,45 @@ def main() -> None:
     out_dir = Path(args.out_dir or Path(cfg.get("output_root", "runs")) / "kfold_cv")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cv_rows, holdout_rows, pred_rows, shap_rows = [], [], [], []
+    if args.learning_curve:
+        lc = cfg.get("learning_curve") or {}
+        lc_models = {k: v for k, v in models.items() if k in lc.get("models", ["xgboost", "logreg"])}
+        rows = []
+        for task in cfg["tasks"]:
+            label_col, classes = TASKS[task]
+            sub = df[df[label_col] >= 0]
+            X_by_set, spec = {}, {}
+            for fs_name in lc.get("feature_sets") or list(sets):
+                if fs_name not in sets:
+                    continue
+                groups, use_rad, use_deep = sets[fs_name]
+                if (use_rad and not blocks["rad"]) or (use_deep and not blocks["deep"]):
+                    continue
+                numeric, categorical = feature_columns(groups)
+                rad, deep = (blocks["rad"] if use_rad else []), (blocks["deep"] if use_deep else [])
+                X_by_set[fs_name], spec[fs_name] = sub[numeric + categorical + rad + deep], (groups, rad, deep)
+
+            def make_pipe(fs_name, model, spec=spec):
+                groups, rad, deep = spec[fs_name]
+                return build_pipeline(groups, rad, deep, k_rad, k_deep, model, rad_select, memory)
+
+            rows += learning_curve_rows(task, X_by_set, sub[label_col].to_numpy(), len(classes), lc_models, cfg,
+                                        make_pipe)
+            print(f"{task}: learning curves for {len(X_by_set)} feature sets x {len(lc_models)} models")
+        shutil.rmtree(memory.location, ignore_errors=True)
+        pd.DataFrame(rows).to_csv(out_dir / "learning_curves.csv", index=False)
+        print(f"Saved {out_dir / 'learning_curves.csv'}")
+        return
+
+    oof_cv = StratifiedKFold(n_splits=cv_cfg.get("folds", 5), shuffle=True, random_state=cfg.get("seed", 42))
+    cv_rows, fold_rows, holdout_rows, pred_rows, shap_rows, oof_rows = [], [], [], [], [], []
     for task in cfg["tasks"]:
         label_col, classes = TASKS[task]
         sub = df[df[label_col] >= 0]
         y = sub[label_col].to_numpy()
+        # Fixed random_state: every feature set and model of this task sees exactly these folds, so their
+        # fold scores pair up for the corrected t-test (aggregate_results.py).
+        fold_sizes = [(len(tr), len(te)) for tr, te in cv.split(np.zeros(len(y)), y)]
         for fs_name, (groups, use_rad, use_deep) in sets.items():
             if wanted_sets is not None and fs_name not in wanted_sets:
                 continue
@@ -221,8 +304,20 @@ def main() -> None:
                     cv_rows.append({"task": task, "features": label, "model": model_name, "metric": metric,
                                     "mean": np.nanmean(vals), "sd": np.nanstd(vals), "n_folds": int(np.isfinite(vals).sum()),
                                     "n": len(y)})
+                    fold_rows += [{"task": task, "features": label, "model": model_name, "metric": metric, "fold": i,
+                                   "value": v, "n_train": n_tr, "n_test": n_te}
+                                  for i, (v, (n_tr, n_te)) in enumerate(zip(vals, fold_sizes))]
                 print(f"{task:9s} | {label:42s} | {model_name:13s} | " + " ".join(
                     f"{r['metric']}={r['mean']:.3f}±{r['sd']:.3f}" for r in cv_rows[-len(SCORING):]))
+                # One out-of-fold probability per patient (a single 5-fold pass), for calibration and decision curves.
+                oof = cross_val_predict(build_pipeline(groups, rad, deep, k_rad, k_deep, make_model(), rad_select, memory),
+                                        X, y, cv=oof_cv, method="predict_proba",
+                                        **{fit_params_name(cross_val_predict): fit_params})
+                present = np.unique(y)
+                oof_rows += [{"task": task, "features": label, "model": model_name, "patient_id": pid, "y": int(yv),
+                              **{f"p_{k}": float(row[list(present).index(k)]) if k in present else 0.0
+                                 for k in range(len(classes))}}
+                             for pid, yv, row in zip(sub.index, y, oof)]
 
                 if args.holdout and splits:
                     train_ids = [p for p in splits["classification"]["train"] + splits["classification"]["val"] if p in sub.index]
@@ -248,6 +343,8 @@ def main() -> None:
     shutil.rmtree(memory.location, ignore_errors=True)
     cv_df = pd.DataFrame(cv_rows)
     cv_df.to_csv(out_dir / "cv_results.csv", index=False)
+    pd.DataFrame(fold_rows).to_csv(out_dir / "cv_folds.csv", index=False)
+    pd.DataFrame(oof_rows).to_csv(out_dir / "oof_predictions.csv", index=False)
     wide = cv_df.assign(v=cv_df["mean"].map("{:.3f}".format) + " ± " + cv_df["sd"].map("{:.3f}".format)).pivot_table(
         index=["task", "features", "model"], columns="metric", values="v", aggfunc="first", sort=False)
     print(f"\n{wide.to_string()}\n\nSaved {out_dir / 'cv_results.csv'}")

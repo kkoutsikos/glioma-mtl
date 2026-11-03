@@ -26,3 +26,10 @@ cv:
   feature_sets: null                         # null = all available, see scripts/kfold_cv.py
   logreg_C: 0.5
   xgboost: {n_estimators: 200, max_depth: 4, learning_rate: 0.05}
+# scripts/kfold_cv.py --learning-curve: macro AUC against the number of training patients. Each training fold is
+# subsampled (stratified) to these fractions; the test folds stay whole and are the same for every feature set.
+learning_curve:
+  fractions: [0.25, 0.5, 0.75, 1.0]
+  repeats: 4                                 # x cv.folds = 20 test folds
+  models: [xgboost, logreg]
+  feature_sets: [age+sex, radiomics, image, clinical+radiomics, image+clinical+radiomics]

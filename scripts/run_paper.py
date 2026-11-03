@@ -13,9 +13,10 @@ masks (cleanup and the backbone that predicted them) and, for classifiers, the b
 ``classification.backbone`` reruns everything downstream. A classifier folder trained for another version
 is moved to ``<output_root>/.stale/`` instead of being resumed. Classifier evaluation also carries
 ``EVAL_VERSION``, so a change in how test predictions are scored re-evaluates without retraining; the
-Grad-CAM panel likewise carries ``PANEL_VERSION``.
+Grad-CAM panel likewise carries ``PANEL_VERSION`` and the k-fold step ``KFOLD_VERSION``.
 
-Stages: splits, ssl, seg, predict, features, cls, kfold, aggregate.
+Stages: splits, ssl, seg, predict, features, cls, explain, kfold, oracle, aggregate, figures. ``oracle`` rescores the
+finished models with ground-truth masks (see ``oracle_steps``); set ``oracle: false`` in the plan to drop it.
 """
 from __future__ import annotations
 
@@ -31,13 +32,19 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-STAGES = ["splits", "ssl", "seg", "predict", "features", "cls", "explain", "kfold", "aggregate", "figures"]
+STAGES = ["splits", "ssl", "seg", "predict", "features", "cls", "explain", "kfold", "oracle", "aggregate", "figures"]
 # Version of the predicted masks. Predicting and feature extraction rerun when their markers predate it.
 MASKS_VERSION = "largest-component"
 # Version of the classifier test evaluation. cls_eval reruns (the trained classifiers are kept) when it changes.
 EVAL_VERSION = "LGG/HGG call from the grade call"
 # Version of the Grad-CAM panel; gradcam_panel reruns when it changes.
 PANEL_VERSION = "calls as evaluated (flip-averaged)"
+# Version of the k-fold step's outputs; kfold reruns when it changes (now: cv_folds.csv, oof_predictions.csv).
+KFOLD_VERSION = "per-fold scores, out-of-fold predictions"
+# Version of the late-fusion learning curves (kfold_cv.py --learning-curve).
+LEARNING_CURVE_VERSION = "stratified fractions of each training fold"
+# Late-fusion feature sets rerun with ground-truth-mask features in the oracle stage (the others use no masks).
+ORACLE_FEATURE_SETS = ["radiomics", "clinical+radiomics", "image", "image+clinical", "image+clinical+radiomics"]
 
 
 @dataclass
@@ -73,6 +80,53 @@ def set_aside_stale_run(step: Step, root: Path, dry_run: bool) -> None:
     if not dry_run:
         old.parent.mkdir(parents=True, exist_ok=True)
         step.run_dir.rename(old)
+
+
+def oracle_steps(plan: dict, root: Path, sets, seg_seeds: list[int], masks: str) -> list[Step]:
+    """Sensitivity analysis: the finished models scored with ground-truth tumour masks instead of the backbone's
+    predicted ones (crop centre, radiomics, deep features), to measure what the segmentation errors cost.
+
+    Nothing is retrained. The end-to-end classifiers are re-evaluated into ``<run>/oracle/``; inside the network
+    the tumour weighting stays its own segmentation head's (no classifier takes the mask as input). Late fusion
+    refits its usual fold pipelines on oracle features into ``kfold_cv_oracle/``; its folds are the same as in
+    ``kfold_cv/``, so the two pair up fold by fold.
+    """
+    cls, kfold = plan["classification"], plan.get("kfold")
+    bb_model = cls["backbone"]
+    bb = f"{bb_model}_s{seg_seeds[0]}"
+    rad_dir, deep_dir = root / "radiomics_label", root / "deep_features_label"
+    rad_csv, deep_csv = (rad_dir / "radiomics_label.csv").as_posix(), (deep_dir / "deep_features_label.csv").as_posix()
+    steps = [
+        Step("oracle_features:radiomics", "oracle", [
+            _script("extract_radiomics.py"), "--config", cls["feature_config"], "--mask-source", "label",
+            "--out-dir", rad_dir.as_posix(), *sets([], ["name=radiomics_label"])], optional=True, needs=["splits"]),
+        Step("oracle_features:deep", "oracle", [
+            _script("extract_deep_features.py"), "--config", cls["feature_config"], "--checkpoint",
+            (root / bb / "best.pt").as_posix(), "--mask-source", "label", "--out-dir", deep_dir.as_posix(),
+            *sets([], ["name=deep_features_label"])], optional=True, needs=[f"seg_train:{bb}"], version=f"backbone {bb}"),
+    ]
+    for exp, spec in (cls.get("experiments") or {}).items():
+        trained = f"{masks}, backbone {spec.get('backbone', bb_model)}_s{seg_seeds[0]}"
+        for seed in spec.get("seeds", cls.get("seeds", [42])):
+            name = f"{exp}_s{seed}"
+            run = (root / name).as_posix()
+            extra, needs = ["data.crop_mask_key=label"], [f"cls_train:{name}"]
+            if spec.get("use_radiomics"):
+                extra.append(f"radiomics.csv={rad_csv}")
+                needs.append("oracle_features:radiomics")
+            steps.append(Step(f"cls_oracle:{name}", "oracle", [
+                _script("evaluate_classifier.py"), "--config", f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",
+                "--split", "test", "--out-dir", f"{run}/oracle", *sets([], extra)],
+                optional=True, needs=needs, version=f"{trained}, eval {EVAL_VERSION}"))
+    if kfold:
+        extra = [f"radiomics.csv={rad_csv}", f"deep_features.csv={deep_csv}",
+                 f"cv.feature_sets=[{', '.join(ORACLE_FEATURE_SETS)}]"]
+        steps.append(Step("kfold_oracle", "oracle", [
+            _script("kfold_cv.py"), "--config", kfold["config"], *(["--holdout"] if kfold.get("holdout") else []),
+            "--out-dir", (root / "kfold_cv_oracle").as_posix(), *sets(kfold.get("overrides"), extra)],
+            optional=True, needs=["oracle_features:radiomics", "oracle_features:deep"],
+            version=f"backbone {bb}, {KFOLD_VERSION}"))
+    return steps
 
 
 def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]:
@@ -194,7 +248,16 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                                              *(["--holdout"] if kfold.get("holdout") else []),
                                              "--out-dir", (root / "kfold_cv").as_posix(),
                                              *sets(kfold.get("overrides"), extra)], needs=needs,
-                              version=masks if len(needs) > 1 else ""))
+                              version=f"{masks if len(needs) > 1 else 'no masks'}, {KFOLD_VERSION}"))
+        if kfold.get("learning_curve", True):
+            steps.append(Step("learning_curves", "kfold", [
+                _script("kfold_cv.py"), "--config", kfold["config"], "--learning-curve",
+                "--out-dir", (root / "learning_curves").as_posix(), *sets(kfold.get("overrides"), extra)],
+                optional=True, needs=needs,
+                version=f"{masks if len(needs) > 1 else 'no masks'}, {LEARNING_CURVE_VERSION}"))
+
+    if cls and plan.get("oracle", True):
+        steps += oracle_steps(plan, root, sets, seeds, masks)
 
     steps.append(Step("aggregate", "aggregate", [_script("aggregate_results.py"), "--plan", "PLAN",
                                                  "--root", root.as_posix(), "--out", (root / "paper_tables").as_posix()],
