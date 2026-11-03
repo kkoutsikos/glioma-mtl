@@ -3,7 +3,8 @@ import pytest
 import torch
 
 from glioma_mtl import plotting
-from glioma_mtl.explain import attention_keys, cam_layers, fusion_attention, grad_cam, token_occlusion
+from glioma_mtl.explain import (attention_keys, cam_layers, fusion_attention, grad_cam, gradcam_panel, panel_patients,
+                                 token_occlusion)
 from glioma_mtl.models import MultiTaskGliomaNet
 
 FS, ROI = 12, 64
@@ -89,3 +90,25 @@ def test_plots_write_files(tmp_path):
                                 tmp_path / "cases.png", "cases"),
     ]
     assert all(p.exists() and p.stat().st_size > 1000 for p in paths)
+
+
+def test_panel_picks_the_most_confident_correct_patient_of_each_class():
+    calls = [{"patient_id": "a", "y": 0, "pred": 0, "p_true": 0.6}, {"patient_id": "b", "y": 0, "pred": 0, "p_true": 0.9},
+             {"patient_id": "c", "y": 0, "pred": 1, "p_true": 0.4}, {"patient_id": "d", "y": 1, "pred": 0, "p_true": 0.3},
+             {"patient_id": "e", "y": 1, "pred": 2, "p_true": 0.35}]
+    # class 1 has no correct call: its most probable patient stands in; class 2 has no patient: no row
+    assert [k["patient_id"] for k in panel_patients(calls, 3)] == ["b", "e"]
+
+
+def test_gradcam_panel_writes_one_figure_per_task(tmp_path):
+    model = _model()
+    torch.manual_seed(2)
+    gt = torch.zeros(1, 1, ROI, ROI, ROI)
+    gt[..., 20:40, 20:40, 24:44] = 1
+    loader = [{"image": torch.randn(1, 1, ROI, ROI, ROI), "tab_clinical": torch.randn(1, 5), "label": gt,
+               "y_grade": torch.tensor([i % 3]), "y_diagnosis": torch.tensor([i % 4]), "patient_id": [f"p{i}"]}
+              for i in range(4)]
+    names = {"grade": ["2", "3", "4"], "diagnosis": ["a", "b", "c", "d"]}
+    paths = gradcam_panel(model, loader, torch.device("cpu"), names, tmp_path, image_name="T2")
+    assert [p.name for p in paths] == ["gradcam_panel_grade.png", "gradcam_panel_diagnosis.png"]
+    assert all(p.stat().st_size > 1000 for p in paths)

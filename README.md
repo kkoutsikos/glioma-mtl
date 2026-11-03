@@ -85,7 +85,8 @@ python scripts/run_paper.py --plan configs/paper.yaml
 
 Tables are written to `runs/paper/paper_tables/` (CSV, Markdown, LaTeX) and figures to
 `runs/paper/paper_figures/`. Explanations (fusion attention, token occlusion, 3D Grad-CAM) are in each
-classifier's `explain/` folder, and XGBoost TreeSHAP is in `kfold_cv/holdout_shap.csv`.
+classifier's `explain/` folder; the paper's Grad-CAM panels (`gradcam_panel_<task>.png`, one test patient
+per class) are also copied to `paper_figures/explain/`. XGBoost TreeSHAP is in `kfold_cv/holdout_shap.csv`.
 
 ## Usage
 

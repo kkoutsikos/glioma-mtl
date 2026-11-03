@@ -403,3 +403,15 @@ def test_a_new_evaluation_version_re_evaluates_without_retraining(tmp_path):
     (train.run_dir / ".step_version").write_text(train.version + "\n")
     runner.set_aside_stale_run(train, tmp_path, dry_run=False)
     assert train.run_dir.exists()
+
+
+def test_the_gradcam_panel_is_its_own_explain_step(tmp_path):
+    """The paper's Grad-CAM figure runs after a finished explain step without redoing the per-patient maps."""
+    import yaml
+
+    runner = _load_script("run_paper")
+    plan = yaml.safe_load((runner.REPO / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    steps = {s.id: s for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]}
+    panel, explain = steps["gradcam_panel:cls_image_only_s42"], steps["explain:cls_image_only_s42"]
+    assert panel.stage == explain.stage == "explain" and panel.args == [*explain.args, "--panel-only"]
+    assert panel.version == explain.version and panel.needs == explain.needs and panel.run_dir is None

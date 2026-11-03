@@ -170,3 +170,71 @@ def explain_classifier(model: MultiTaskGliomaNet, loader, device: torch.device, 
                                   f"Mean fusion attention, layer {layer} (n={attn['patient_id'].nunique()})")
         results["attention"] = attn
     return results
+
+
+def panel_patients(calls: Sequence[Mapping], n_classes: int) -> list[Mapping]:
+    """One patient per true class: the correctly called one with the highest probability or, for a class with no
+    correct call, the one with the highest probability for its true class (shown as misclassified)."""
+    picked = []
+    for c in range(n_classes):
+        of_class = [k for k in calls if k["y"] == c]
+        if of_class:
+            correct = [k for k in of_class if k["pred"] == c]
+            picked.append(max(correct or of_class, key=lambda k: k["p_true"]))
+    return picked
+
+
+def gradcam_panel(model: MultiTaskGliomaNet, loader, device: torch.device, class_names: Mapping[str, Sequence],
+                  out_dir: str | Path, mask_key: str = "label", image_name: str = "image") -> list[Path]:
+    """One paper figure per task, ``gradcam_panel_<task>.png``: a row per class (see ``panel_patients``), the axial
+    slice through the tumour with the Grad-CAM of every feature map the classifier pools.
+
+    Two passes over the loader (batch size 1): predictions for every patient, then Grad-CAM for the picked ones.
+    """
+    from . import plotting
+
+    model.eval().to(device)
+
+    def inputs(batch):
+        image = batch["image"].to(device)
+        tabular = {n: batch[f"tab_{n}"].to(device) for n in model.tabular_dims}
+        return image, tabular, batch[mask_key].to(device) if model.mask_mode == "input" else None
+
+    calls: dict[str, list] = {t: [] for t in model.tasks}
+    for batch in tqdm(loader, desc="panel: predict", leave=False):
+        image, tabular, mask = inputs(batch)
+        with torch.no_grad():
+            enc = model.encode(image, tabular, mask)
+            logits, _ = model.fuse(model.context(enc["image_tokens"], enc["tab_tokens"]))
+        for task in model.tasks:
+            y = int(torch.as_tensor(batch[f"y_{task}"]).view(-1)[0])
+            if y >= 0:
+                p = torch.softmax(logits[task][0].float(), 0).cpu().numpy()
+                calls[task].append({"patient_id": batch["patient_id"][0], "y": y, "pred": int(p.argmax()),
+                                    "p_true": float(p[y]), "p_pred": float(p.max())})
+    picked = {t: panel_patients(calls[t], len(class_names[t])) for t in model.tasks}
+
+    layers = cam_layers(model)
+    slices = {}
+    for batch in tqdm(loader, desc="panel: Grad-CAM", leave=False):
+        pid = batch["patient_id"][0]
+        tasks = [t for t, rows in picked.items() if any(k["patient_id"] == pid for k in rows)]
+        if not tasks:
+            continue
+        image, tabular, mask = inputs(batch)
+        with torch.no_grad():
+            logits = model.encode(image, tabular, mask)["feats"].logits
+        seg = (torch.sigmoid(logits.float()) > 0.5)[0, 0].cpu().numpy()
+        gt = batch["label"][0, 0].cpu().numpy() if "label" in batch else None
+        z = plotting.tumour_center(gt, seg)[2]
+        for task in tasks:
+            slices[pid, task] = {"image": image[0, 0, :, :, z].cpu().numpy(), "seg": seg[:, :, z],
+                                 "gt": None if gt is None else gt[:, :, z],
+                                 "cams": {layer: grad_cam(model, image, tabular, task, layer, mask=mask)[0][:, :, z]
+                                          for layer in layers}}
+    return [plotting.plot_cam_panel([{**k, **slices[k["patient_id"], task]} for k in rows], class_names[task],
+                                    layers, Path(out_dir) / f"gradcam_panel_{task}.png",
+                                    f"{task}: Grad-CAM, the most confidently correct test patient of each class "
+                                    "(a class with no correct call: its most probable patient)",
+                                    image_name)
+            for task, rows in picked.items() if rows]

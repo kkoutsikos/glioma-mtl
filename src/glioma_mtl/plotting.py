@@ -139,7 +139,8 @@ def _slices(volume: np.ndarray, center: Sequence[int]) -> list[np.ndarray]:
     return [np.rot90(volume[:, :, z]), np.rot90(volume[:, y, :]), np.rot90(volume[x, :, :])]
 
 
-def _center(*masks: np.ndarray | None) -> list[int]:
+def tumour_center(*masks: np.ndarray | None) -> list[int]:
+    """Voxel where the first non-empty mask is thickest along each axis; the volume centre if all are empty."""
     for m in masks:
         if m is not None and m.any():
             return [int(np.argmax(m.sum(axis=tuple(a for a in range(3) if a != ax)))) for ax in range(3)]
@@ -150,7 +151,7 @@ def _center(*masks: np.ndarray | None) -> list[int]:
 def plot_cam(image: np.ndarray, cam: np.ndarray, gt: np.ndarray | None, pred: np.ndarray | None,
              out: str | Path, title: str) -> Path:
     """Axial / coronal / sagittal slices through the tumour: image, Grad-CAM overlay, GT (green), prediction (red)."""
-    center = _center(gt, cam > 0.5)
+    center = tumour_center(gt, cam > 0.5)
     fig = Figure(figsize=(12, 4.4))
     axes = fig.subplots(1, 3)
     for ax, name, img, c, g, p in zip(axes, ("axial", "coronal", "sagittal"), _slices(image, center),
@@ -164,6 +165,36 @@ def plot_cam(image: np.ndarray, cam: np.ndarray, gt: np.ndarray | None, pred: np
             ax.contour(p, levels=[0.5], colors="red", linewidths=1, linestyles="--")
         ax.set_title(name, fontsize=9)
         ax.axis("off")
+    fig.suptitle(title + "\n(green: ground truth, red dashed: predicted tumour)", fontsize=9)
+    return _save(fig, out)
+
+
+def plot_cam_panel(cases: Sequence[Mapping], class_names: Sequence, layers: Sequence[str], out: str | Path,
+                   title: str, image_name: str = "image") -> Path:
+    """Rows = patients as axial slices through the tumour ('image', 'gt', 'seg', 'cams': {layer: slice}, 'y',
+    'pred', 'p_pred'); columns = the image with its masks, then the Grad-CAM of each layer."""
+    names = short(class_names)
+    fig = Figure(figsize=(2.4 * (len(layers) + 1) + 0.8, 2.5 * len(cases) + 0.7))
+    axes = fig.subplots(len(cases), len(layers) + 1, squeeze=False)
+    for r, case in enumerate(cases):
+        img, seg = np.rot90(case["image"]), np.rot90(case["seg"])
+        gt = np.rot90(case["gt"]) if case["gt"] is not None else None
+        for c, ax in enumerate(axes[r]):
+            ax.imshow(img, cmap="gray")
+            if c:
+                ax.imshow(np.rot90(case["cams"][layers[c - 1]]), cmap="jet", alpha=0.4, vmin=0, vmax=1)
+            if gt is not None and gt.any():
+                ax.contour(gt, levels=[0.5], colors="lime", linewidths=1)
+            if c == 0 and seg.any():
+                ax.contour(seg, levels=[0.5], colors="red", linewidths=1, linestyles="--")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if r == 0:
+                ax.set_title(image_name if c == 0 else f"Grad-CAM, {layers[c - 1].replace('stage', 'stage ')}",
+                             fontsize=9)
+        wrong = "" if case["pred"] == case["y"] else "\nmisclassified"
+        axes[r, 0].set_ylabel(f"true {names[case['y']]}\npred {names[case['pred']]} ({case['p_pred']:.2f}){wrong}",
+                              fontsize=8)
     fig.suptitle(title + "\n(green: ground truth, red dashed: predicted tumour)", fontsize=9)
     return _save(fig, out)
 

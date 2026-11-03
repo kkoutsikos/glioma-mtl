@@ -169,11 +169,14 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                                   version=f"{trained}, eval {EVAL_VERSION}"))
             first = f"{exp}_s{exp_seeds[0]}"
             run = (root / first).as_posix()
-            steps.append(Step(f"explain:{first}", "explain", [
-                _script("explain_classifier.py"), "--config", f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",
-                "--split", "test", "--out-dir", f"{run}/explain",
-                *sets([], ["data.crop_mask_key=pred_mask", f"data.pred_mask_dir={pred_dir}"])],
-                optional=True, needs=[f"cls_train:{first}", "predict:test"], version=trained))
+            explain = [_script("explain_classifier.py"), "--config", f"{run}/config.yaml", "--checkpoint",
+                       f"{run}/best.pt", "--split", "test", "--out-dir", f"{run}/explain",
+                       *sets([], ["data.crop_mask_key=pred_mask", f"data.pred_mask_dir={pred_dir}"])]
+            steps.append(Step(f"explain:{first}", "explain", explain, optional=True,
+                              needs=[f"cls_train:{first}", "predict:test"], version=trained))
+            # The paper's Grad-CAM figure (one patient per class); its own step, so it never reruns the above.
+            steps.append(Step(f"gradcam_panel:{first}", "explain", [*explain, "--panel-only"], optional=True,
+                              needs=[f"cls_train:{first}", "predict:test"], version=trained))
 
     if kfold:
         extra = []
