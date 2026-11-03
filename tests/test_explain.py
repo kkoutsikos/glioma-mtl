@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
 
 from glioma_mtl import plotting
+from glioma_mtl.engine import predict
 from glioma_mtl.explain import (attention_keys, cam_layers, fusion_attention, grad_cam, gradcam_panel, panel_patients,
                                  token_occlusion)
 from glioma_mtl.models import MultiTaskGliomaNet
@@ -100,15 +103,37 @@ def test_panel_picks_the_most_confident_correct_patient_of_each_class():
     assert [k["patient_id"] for k in panel_patients(calls, 3)] == ["b", "e"]
 
 
-def test_gradcam_panel_writes_one_figure_per_task(tmp_path):
-    model = _model()
+def _panel_loader(n=4):
     torch.manual_seed(2)
     gt = torch.zeros(1, 1, ROI, ROI, ROI)
     gt[..., 20:40, 20:40, 24:44] = 1
-    loader = [{"image": torch.randn(1, 1, ROI, ROI, ROI), "tab_clinical": torch.randn(1, 5), "label": gt,
-               "y_grade": torch.tensor([i % 3]), "y_diagnosis": torch.tensor([i % 4]), "patient_id": [f"p{i}"]}
-              for i in range(4)]
-    names = {"grade": ["2", "3", "4"], "diagnosis": ["a", "b", "c", "d"]}
-    paths = gradcam_panel(model, loader, torch.device("cpu"), names, tmp_path, image_name="T2")
+    return [{"image": torch.randn(1, 1, ROI, ROI, ROI), "tab_clinical": torch.randn(1, 5), "label": gt,
+             "y_grade": torch.tensor([i % 3]), "y_diagnosis": torch.tensor([i % 4]), "patient_id": [f"p{i}"]}
+            for i in range(n)]
+
+
+PANEL_NAMES = {"grade": ["2", "3", "4"], "diagnosis": ["a", "b", "c", "d"]}
+
+
+def test_gradcam_panel_writes_one_figure_per_task(tmp_path):
+    paths = gradcam_panel(_model(), _panel_loader(), torch.device("cpu"), PANEL_NAMES, tmp_path, image_name="T2")
     assert [p.name for p in paths] == ["gradcam_panel_grade.png", "gradcam_panel_diagnosis.png"]
     assert all(p.stat().st_size > 1000 for p in paths)
+
+
+def test_gradcam_panel_shows_the_reported_flip_averaged_calls(tmp_path, monkeypatch):
+    model, loader = _model(), _panel_loader()
+    reported = predict(model, loader, torch.device("cpu"), tta=True)[0].set_index("patient_id")
+    shown = {}
+
+    def capture(cases, class_names, layers, out, *args, **kwargs):
+        shown[Path(out).stem.removeprefix("gradcam_panel_")] = cases
+        return Path(out)
+
+    monkeypatch.setattr(plotting, "plot_cam_panel", capture)
+    gradcam_panel(model, loader, torch.device("cpu"), PANEL_NAMES, tmp_path, tta=True)
+    assert set(shown) == set(PANEL_NAMES)
+    for task, cases in shown.items():
+        for case in cases:
+            probs = reported.loc[case["patient_id"], [f"p_{task}_{k}" for k in range(len(PANEL_NAMES[task]))]]
+            assert case["pred"] == probs.to_numpy().argmax() and np.isclose(case["p_pred"], probs.max())

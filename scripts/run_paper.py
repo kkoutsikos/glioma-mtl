@@ -12,7 +12,8 @@ marker: they rerun every time they are selected, so they always reflect the fini
 masks (cleanup and the backbone that predicted them) and, for classifiers, the backbone, so switching
 ``classification.backbone`` reruns everything downstream. A classifier folder trained for another version
 is moved to ``<output_root>/.stale/`` instead of being resumed. Classifier evaluation also carries
-``EVAL_VERSION``, so a change in how test predictions are scored re-evaluates without retraining.
+``EVAL_VERSION``, so a change in how test predictions are scored re-evaluates without retraining; the
+Grad-CAM panel likewise carries ``PANEL_VERSION``.
 
 Stages: splits, ssl, seg, predict, features, cls, kfold, aggregate.
 """
@@ -35,6 +36,8 @@ STAGES = ["splits", "ssl", "seg", "predict", "features", "cls", "explain", "kfol
 MASKS_VERSION = "largest-component"
 # Version of the classifier test evaluation. cls_eval reruns (the trained classifiers are kept) when it changes.
 EVAL_VERSION = "LGG/HGG call from the grade call"
+# Version of the Grad-CAM panel; gradcam_panel reruns when it changes.
+PANEL_VERSION = "calls as evaluated (flip-averaged)"
 
 
 @dataclass
@@ -176,7 +179,7 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                               needs=[f"cls_train:{first}", "predict:test"], version=trained))
             # The paper's Grad-CAM figure (one patient per class); its own step, so it never reruns the above.
             steps.append(Step(f"gradcam_panel:{first}", "explain", [*explain, "--panel-only"], optional=True,
-                              needs=[f"cls_train:{first}", "predict:test"], version=trained))
+                              needs=[f"cls_train:{first}", "predict:test"], version=f"{trained}, panel {PANEL_VERSION}"))
 
     if kfold:
         extra = []

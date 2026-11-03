@@ -414,4 +414,5 @@ def test_the_gradcam_panel_is_its_own_explain_step(tmp_path):
     steps = {s.id: s for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]}
     panel, explain = steps["gradcam_panel:cls_image_only_s42"], steps["explain:cls_image_only_s42"]
     assert panel.stage == explain.stage == "explain" and panel.args == [*explain.args, "--panel-only"]
-    assert panel.version == explain.version and panel.needs == explain.needs and panel.run_dir is None
+    assert panel.version == f"{explain.version}, panel {runner.PANEL_VERSION}"   # reruns alone when the panel changes
+    assert panel.needs == explain.needs and panel.run_dir is None

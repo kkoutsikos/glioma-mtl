@@ -1,6 +1,7 @@
 """Figures for the paper. Uses matplotlib's object API (no pyplot), so it works headless and in subprocesses."""
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -21,10 +22,34 @@ def short(names: Sequence) -> list[str]:
     return [SHORT_NAMES.get(str(n), str(n)) for n in names]
 
 
+def _fit_titles(fig: Figure) -> bool:
+    """Break titles wider than their room onto more lines, instead of letting the figure edge clip them.
+
+    An axes title is centred on its axes, so its room is twice the distance from that centre to the nearer
+    figure edge; the figure title has the whole width. Returns whether a title changed.
+    """
+    changed = False
+    width = fig.bbox.width
+    for text in [ax.title for ax in fig.axes] + [getattr(fig, "_suptitle", None)]:
+        if text is None or not text.get_text():
+            continue
+        box = text.get_window_extent()
+        center = (box.x0 + box.x1) / 2
+        room = 0.95 * 2 * min(center, width - center)
+        if box.width > room:
+            lines = text.get_text().split("\n")
+            chars = int(room / (box.width / max(len(line) for line in lines)))
+            text.set_text("\n".join(textwrap.fill(line, max(chars, 10)) for line in lines))
+            changed = True
+    return changed
+
+
 def _save(fig: Figure, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
+    if _fit_titles(fig):
+        fig.tight_layout()
     fig.savefig(path, dpi=150)
     return path
 

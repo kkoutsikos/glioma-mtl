@@ -14,9 +14,10 @@ data/metadata/*.csv
 # Third-party code cloned at run time (SegMamba)
 third_party/
 
-# Training outputs
+# Training outputs (paper_runs/: the Colab output folder, downloaded from Drive)
 runs/
 outputs/
+paper_runs/
 *.pt
 *.pth
 *.ckpt

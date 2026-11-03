@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from .engine.classification import predict, task_arrays
 from .models.classification import MultiTaskGliomaNet
 
 
@@ -185,11 +186,15 @@ def panel_patients(calls: Sequence[Mapping], n_classes: int) -> list[Mapping]:
 
 
 def gradcam_panel(model: MultiTaskGliomaNet, loader, device: torch.device, class_names: Mapping[str, Sequence],
-                  out_dir: str | Path, mask_key: str = "label", image_name: str = "image") -> list[Path]:
+                  out_dir: str | Path, mask_key: str = "label", image_name: str = "image",
+                  tta: bool = False) -> list[Path]:
     """One paper figure per task, ``gradcam_panel_<task>.png``: a row per class (see ``panel_patients``), the axial
     slice through the tumour with the Grad-CAM of every feature map the classifier pools.
 
     Two passes over the loader (batch size 1): predictions for every patient, then Grad-CAM for the picked ones.
+    The predictions are the reported ones (``predict``; pass the evaluation's ``tta``, i.e. probabilities averaged
+    over the 8 flips), so the panel's calls match the confusion matrices; each map explains that call on the
+    unflipped crop.
     """
     from . import plotting
 
@@ -200,26 +205,20 @@ def gradcam_panel(model: MultiTaskGliomaNet, loader, device: torch.device, class
         tabular = {n: batch[f"tab_{n}"].to(device) for n in model.tabular_dims}
         return image, tabular, batch[mask_key].to(device) if model.mask_mode == "input" else None
 
-    calls: dict[str, list] = {t: [] for t in model.tasks}
-    for batch in tqdm(loader, desc="panel: predict", leave=False):
-        image, tabular, mask = inputs(batch)
-        with torch.no_grad():
-            enc = model.encode(image, tabular, mask)
-            logits, _ = model.fuse(model.context(enc["image_tokens"], enc["tab_tokens"]))
-        for task in model.tasks:
-            y = int(torch.as_tensor(batch[f"y_{task}"]).view(-1)[0])
-            if y >= 0:
-                p = torch.softmax(logits[task][0].float(), 0).cpu().numpy()
-                calls[task].append({"patient_id": batch["patient_id"][0], "y": y, "pred": int(p.argmax()),
-                                    "p_true": float(p[y]), "p_pred": float(p.max())})
+    preds, _ = predict(model, loader, device, mask_key=mask_key, tta=tta)
+    calls: dict[str, list] = {}
+    for task in model.tasks:
+        y, prob = task_arrays(preds, task)
+        calls[task] = [{"patient_id": pid, "y": int(t), "pred": int(p.argmax()), "p_true": float(p[t]),
+                        "p_pred": float(p.max())} for pid, t, p in zip(preds["patient_id"], y, prob) if t >= 0]
     picked = {t: panel_patients(calls[t], len(class_names[t])) for t in model.tasks}
 
     layers = cam_layers(model)
     slices = {}
     for batch in tqdm(loader, desc="panel: Grad-CAM", leave=False):
         pid = batch["patient_id"][0]
-        tasks = [t for t, rows in picked.items() if any(k["patient_id"] == pid for k in rows)]
-        if not tasks:
+        calls_of = {t: k["pred"] for t, rows in picked.items() for k in rows if k["patient_id"] == pid}
+        if not calls_of:
             continue
         image, tabular, mask = inputs(batch)
         with torch.no_grad():
@@ -227,14 +226,15 @@ def gradcam_panel(model: MultiTaskGliomaNet, loader, device: torch.device, class
         seg = (torch.sigmoid(logits.float()) > 0.5)[0, 0].cpu().numpy()
         gt = batch["label"][0, 0].cpu().numpy() if "label" in batch else None
         z = plotting.tumour_center(gt, seg)[2]
-        for task in tasks:
+        for task, call in calls_of.items():
             slices[pid, task] = {"image": image[0, 0, :, :, z].cpu().numpy(), "seg": seg[:, :, z],
                                  "gt": None if gt is None else gt[:, :, z],
-                                 "cams": {layer: grad_cam(model, image, tabular, task, layer, mask=mask)[0][:, :, z]
+                                 "cams": {layer: grad_cam(model, image, tabular, task, layer, call, mask)[0][:, :, z]
                                           for layer in layers}}
+    calls_note = "; calls averaged over 8 flips as in the metrics, maps of the unflipped crop" if tta else ""
     return [plotting.plot_cam_panel([{**k, **slices[k["patient_id"], task]} for k in rows], class_names[task],
                                     layers, Path(out_dir) / f"gradcam_panel_{task}.png",
                                     f"{task}: Grad-CAM, the most confidently correct test patient of each class "
-                                    "(a class with no correct call: its most probable patient)",
+                                    f"(a class with no correct call: its most probable patient){calls_note}",
                                     image_name)
             for task, rows in picked.items() if rows]

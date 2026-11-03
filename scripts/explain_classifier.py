@@ -44,7 +44,8 @@ def main() -> None:
     names = {t: [str(c) for c in TASKS[t][1]] for t in data.tasks}
     mask_key = d.get("model_mask_key", "label")
     if args.panel_only:
-        paths = gradcam_panel(model, loader, device, names, out_dir, mask_key, d.get("modalities", ["T2"])[0])
+        paths = gradcam_panel(model, loader, device, names, out_dir, mask_key, d.get("modalities", ["T2"])[0],
+                              tta=cfg.get("inference", {}).get("tta_flips", False))  # the calls evaluation reports
         LOG.info("Wrote %s", ", ".join(str(p) for p in paths))
         return
     results = explain_classifier(model, loader, device, names, out_dir, mask_key=mask_key, gradcam=not args.no_gradcam)
