@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import torch  # noqa: F401  (load before pandas; see src/glioma_mtl/__init__.py)
 import argparse
+import inspect
 import shutil
 import tempfile
 from pathlib import Path
@@ -73,6 +74,22 @@ SCORING = {"accuracy": "accuracy", "balanced_accuracy": "balanced_accuracy", "ma
            "macro_auc": "roc_auc_ovr"}
 
 
+def _check_xgboost_works_with_sklearn(xgb_cls) -> None:
+    """xgboost < 2.1.4 breaks on scikit-learn >= 1.6 (estimator tags). Inside cross_validate that would only
+    turn every XGBoost fold into NaN, so fail here, before hours of CV, with the fix."""
+    try:
+        from sklearn.utils import get_tags   # scikit-learn >= 1.6
+    except ImportError:
+        return
+    try:
+        get_tags(xgb_cls())
+    except AttributeError as err:
+        import sklearn
+        import xgboost
+        raise SystemExit(f"xgboost {xgboost.__version__} does not work with scikit-learn {sklearn.__version__}. "
+                         "Run: pip install -U 'xgboost>=2.1.4'") from err
+
+
 def make_models(cfg: dict) -> dict:
     models = {
         "majority": lambda: DummyClassifier(strategy="most_frequent"),
@@ -90,11 +107,17 @@ def make_models(cfg: dict) -> dict:
     except ImportError:
         print("xgboost not installed; skipping it (pip install xgboost)")
     else:
+        _check_xgboost_works_with_sklearn(XGBClassifier)
         xgb = {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05, "subsample": 0.8,
                "colsample_bytree": 0.8, **(cfg.get("xgboost") or {})}  # thesis: 200 trees, depth 4, lr 0.05
         models["xgboost"] = lambda: XGBClassifier(**xgb, tree_method="hist", random_state=0, n_jobs=-1)
     wanted = cfg.get("models")
     return {k: v for k, v in models.items() if wanted is None or k in wanted or k == "majority"}
+
+
+def fit_params_name(fn) -> str:
+    """scikit-learn 1.4 renamed ``cross_validate(fit_params=...)`` to ``params`` and 1.6 removed the old name."""
+    return "params" if "params" in inspect.signature(fn).parameters else "fit_params"
 
 
 def _block(selector: TopK) -> Pipeline:
@@ -191,8 +214,8 @@ def main() -> None:
                 fit_params = ({"clf__sample_weight": compute_sample_weight("balanced", y)}
                               if model_name == "xgboost" else None)
                 pipeline = build_pipeline(groups, rad, deep, k_rad, k_deep, make_model(), rad_select, memory)
-                res = cross_validate(pipeline, X, y, cv=cv, scoring=SCORING, fit_params=fit_params,
-                                     error_score=np.nan)
+                res = cross_validate(pipeline, X, y, cv=cv, scoring=SCORING, error_score=np.nan,
+                                     **{fit_params_name(cross_validate): fit_params})
                 for metric in SCORING:
                     vals = res[f"test_{metric}"]
                     cv_rows.append({"task": task, "features": label, "model": model_name, "metric": metric,

@@ -1,6 +1,7 @@
 """Classification metrics with bootstrap confidence intervals."""
 from __future__ import annotations
 
+import warnings
 from typing import Sequence
 
 import numpy as np
@@ -42,8 +43,12 @@ def classification_metrics(y: Sequence[int], prob: np.ndarray, class_names: Sequ
     rows = []
     for name, fn in metrics.items():
         try:
-            point, low, high = (bootstrap_ci(y_true=y, y_score=prob, metric=fn, seed=seed) if ci
-                                else (fn(y, prob), np.nan, np.nan))
+            # A bootstrap resample of a small test set often lacks a rare class that the model still predicts;
+            # balanced accuracy then averages recall over the classes present and warns once per resample.
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
+                point, low, high = (bootstrap_ci(y_true=y, y_score=prob, metric=fn, seed=seed) if ci
+                                    else (fn(y, prob), np.nan, np.nan))
         except ValueError:
             point = low = high = np.nan
         rows.append({"metric": name, "value": point, "ci_low": low, "ci_high": high, "n": len(y)})

@@ -12,5 +12,5 @@ tqdm>=4.65
 # Optional
 pyradiomics>=3.1   # scripts/extract_radiomics.py
 SimpleITK>=2.2
-xgboost>=2.0       # tabular baselines
+xgboost>=2.1.4     # tabular baselines (>= 2.1.4 for scikit-learn 1.6)
 pytest>=7.0        # tests

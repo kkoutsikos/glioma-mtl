@@ -63,6 +63,25 @@ def test_rfe_keeps_informative_radiomics_on_training_labels_only(tmp_path):
     assert list(pipe[:-1].get_feature_names_out()) == ["rad__original_f20", "rad__original_f21"]
 
 
+def test_kfold_passes_sample_weights_under_either_scikit_learn_name():
+    kfold = _load_script("kfold_cv")
+    old = lambda estimator, X, y=None, *, fit_params=None: None   # scikit-learn < 1.4
+    new = lambda estimator, X, y=None, *, params=None: None       # scikit-learn >= 1.4 (only name from 1.6)
+    assert kfold.fit_params_name(old) == "fit_params" and kfold.fit_params_name(new) == "params"
+
+
+def test_bootstrap_metrics_do_not_warn_about_classes_missing_from_a_resample(recwarn):
+    from glioma_mtl.evaluation import classification_metrics
+
+    rng = np.random.default_rng(0)
+    y = np.r_[np.zeros(12, int), np.ones(12, int), 2]                # one patient of a rare class
+    prob = rng.dirichlet(np.ones(3), size=len(y))
+    table, _ = classification_metrics(y, prob, ["a", "b", "c"])
+    assert table.set_index("metric").loc["balanced_accuracy", "ci_low"] <= table.set_index("metric").loc[
+        "balanced_accuracy", "ci_high"]
+    assert not [w for w in recwarn if "y_pred contains classes not in y_true" in str(w.message)]
+
+
 def test_holm_correction():
     holm = _load_script("aggregate_results").holm
     assert np.allclose(holm([0.01, 0.04, 0.03]), [0.03, 0.06, 0.06])

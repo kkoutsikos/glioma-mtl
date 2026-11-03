@@ -22,7 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 radiomics = ["pyradiomics>=3.1", "SimpleITK>=2.2"]
-boosting = ["xgboost>=2.0"]
+boosting = ["xgboost>=2.1.4"]          # 2.1.4: first release that works with scikit-learn 1.6
 dev = ["pytest>=7.0", "nbstripout>=0.6"]
 
 [tool.setuptools.packages.find]
