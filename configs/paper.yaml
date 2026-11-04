@@ -70,3 +70,5 @@ kfold:                                  # XGBoost / logistic regression / RF / M
   use_radiomics: true
   holdout: true
   learning_curve: true                  # AUC against training-set size (kfold_cv.yaml: learning_curve), CPU
+  split_gap: true                       # fit on train, predict val + test, for the validation-test gap test, CPU
+  negative_control: true                # shuffled labels, feature steps inside against before the folds, CPU

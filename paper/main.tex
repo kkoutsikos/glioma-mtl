@@ -1,5 +1,7 @@
-% Draft manuscript. Numbers come from runs/paper (paper_runs/) as of 3 Nov 2026: one seed per model.
-% Figures are read from ../paper_runs/paper_figures/ (the Colab output, not in git); see README.md.
+% Draft manuscript. Numbers come from runs/paper (paper_runs/) as of 4 Nov 2026: one seed per model.
+% Segmentation and end-to-end results are the Colab output; late fusion (kfold_cv, split_gap, negative_control,
+% learning_curves) was rerun on CPU. Figures are read from ../paper_runs/paper_figures/ (not in git); see README.md.
+% If seeds 43-44 are run later, replace the one-seed results with mean +- SD (scripts/aggregate_results.py).
 \documentclass[11pt]{article}
 
 \usepackage[T1]{fontenc}
@@ -40,21 +42,30 @@ versus HGG and IDH status. Inputs were limited to the images, pre-operative clin
 Molecular and surgical variables, which define or follow the labels, were used only in a labelled reference
 experiment. One nested patient-level split was fixed before training and every feature selector was fit on training
 data only. We report bootstrap confidence intervals, pre-specified paired tests, repeated 5-fold cross-validation
-(CV) and an analysis with ground-truth tumour masks.
+(CV) and an analysis with ground-truth tumour masks. Post hoc, we tested validation--test gaps against chance
+re-assignment of patients and ran a shuffled-label control.
 
 \noindent\textbf{Results.} SegResNet reached the highest Dice (0.865, 95\% CI 0.828--0.899) and the lowest HD95
 (11.7~mm). The best SegMamba and SwinUNETR runs matched its Dice but had significantly larger HD95, and
 self-supervised pretraining gave no gain (Dice 0.842 vs 0.843). Molecular and surgical variables (IDH, 1p/19q,
-MGMT, extent of resection) alone gave a CV diagnosis AUC of 0.93 without any imaging. Without them, the best CV
-diagnosis AUC was $0.836 \pm 0.053$ for clinical variables plus radiomics, and adding deep image features gave
-$0.835 \pm 0.047$. Age and sex alone predicted IDH status with a CV AUC of 0.85--0.90. An end-to-end image +
-clinical + radiomics model reached a test diagnosis AUC of 0.916 (0.837--0.985) but 0.619 on the validation split
-of the same size and class mix, and no pre-specified difference between end-to-end models was significant after
-correction.
+MGMT, extent of resection) alone gave a CV diagnosis AUC of 0.93 without any imaging. Without them, clinical variables
+plus radiomics reached a CV diagnosis AUC of $0.830 \pm 0.051$ against $0.652 \pm 0.045$ for clinical variables alone
+with XGBoost, and 0.830 against 0.727 with logistic regression (both corrected $p < 0.01$). Deep image features gave a
+similar gain on their own but none once radiomics were in the model (XGBoost $0.831 \pm 0.046$, $p = 0.99$), and
+radiomics alone were not significantly better than deep features alone. Inside age bands, radiomics kept an LGG versus
+HGG AUC of 0.66--0.81 against 0.45--0.62 for age and sex (logistic regression). Age and sex alone predicted IDH status
+with a CV AUC of 0.85--0.90; imaging added nothing significant after correction and did not clearly beat age inside age
+bands. On shuffled labels the pipeline scored 0.49--0.51, against up to 0.58 when features were selected before the
+folds. For diagnosis, chance re-assignment of patients alone moved the gap between the two 25-patient splits by about
+$\pm 0.2$ AUC (95\% range). An end-to-end image + clinical + radiomics model reached a test diagnosis AUC of 0.916
+(0.837--0.985) but 0.619 on validation, and no pre-specified difference between end-to-end models was significant
+after correction.
 
-\noindent\textbf{Conclusions.} Without leakage, T2-weighted imaging adds information mainly through hand-crafted
-radiomics, deep features add nothing beyond them, and results on a single 25-patient split are too variable to rank
-models. Code and the experiment protocol are public.
+\noindent\textbf{Conclusions.} Without leakage, T2-weighted imaging adds to clinical variables for diagnosis through
+either radiomics or deep features, which are largely redundant with each other. For grade, diagnosis and LGG versus HGG
+it still beats age and sex inside age bands, so it is not merely a proxy for age; for IDH status we could not show
+this. Results on a single 25-patient split are too variable to rank models. Code and the experiment protocol are
+public.
 \end{abstract}
 
 \noindent\textbf{Keywords:} glioma, WHO~2021, radiogenomics, data leakage, segmentation benchmark, SegMamba,
@@ -101,7 +112,10 @@ Our contributions are:
   \item a segmentation benchmark under one matched budget, with paired statistics;
   \item an input ladder evaluated both end to end and by late fusion with repeated CV and pre-specified tests;
   \item a labelled leakage reference that quantifies how molecular inputs produce near-perfect numbers;
-  \item analyses of split-to-split variance and of how segmentation errors propagate to classification;
+  \item a permutation test of validation--test gaps, and an analysis of how segmentation errors propagate to
+        classification;
+  \item a shuffled-label control of the whole late-fusion pipeline, which also measures what feature selection
+        before the folds would have cost;
   \item an open, resumable implementation.
 \end{itemize}
 
@@ -109,16 +123,15 @@ Our contributions are:
 \section{Materials and methods}
 
 \subsection{Data}
-We used the UCSF Preoperative Diffuse Glioma MRI dataset (UCSF-PDGM)~\cite{calabrese2022ucsf}: 501 adults with
+We used the UCSF Preoperative Diffuse Glioma MRI dataset (UCSF-PDGM)~\cite{calabrese2022ucsf}: 495 adults with
 histopathologically confirmed WHO grade 2--4 diffuse glioma, 3~T pre-operative MRI, expert tumour segmentations and
-clinical, molecular and survival metadata. We used only the T2-weighted sequence, which is part of every glioma
-protocol, to study what a single structural sequence carries. Segmentation used the 495 patients with a T2 volume
-and a segmentation \todo{state why the other 6 were excluded}. The target was the whole tumour, with all labelled
-compartments merged.
+clinical, molecular and survival metadata. The dataset's 6 follow-up scans of these patients were excluded. We used
+only the T2-weighted sequence, which is part of every glioma protocol, to study what a single structural sequence
+carries. The segmentation target was the whole tumour, with all labelled compartments merged.
 
-The cohort is dominated by grade 4 (402 of 501 patients). Classification therefore used a grade-balanced
-162-patient sub-cohort: all 56 grade-2 and 43 grade-3 patients and 63 grade-4 patients, so 339 grade-4 patients
-were excluded. Its median age was 48 years (range 19--81), 38.9\% were female, and 81 tumours were IDH-mutant
+The cohort is dominated by grade 4 (396 of 495 patients). Classification therefore used a grade-balanced
+162-patient sub-cohort: all 56 grade-2 and 43 grade-3 patients and 63 randomly drawn grade-4 patients, so 333 grade-4
+patients were excluded. Its median age was 48 years (range 19--81), 38.9\% were female, and 81 tumours were IDH-mutant
 (Table~\ref{tab:cohort}). Targets were:
 \begin{itemize}
   \item three-way WHO grade;
@@ -298,6 +311,10 @@ and logistic regression is reported alongside. As a fully clean confirmation, ev
 training + validation and scored on the 25 test patients. XGBoost feature attributions were computed with
 TreeSHAP~\cite{lundberg2017shap,lundberg2020tree}.
 
+Late fusion ran on CPU (scikit-learn 1.2.1, XGBoost 2.1.3). An earlier run of this pipeline on the same folds under
+other library versions differed in CV macro AUC by at most 0.009 for XGBoost, logistic regression and the random
+forest, and by at most 0.028 for the MLP.
+
 \subsection{Explanations and classification metrics}
 For the first seed of each end-to-end classifier we recorded:
 \begin{itemize}
@@ -346,12 +363,38 @@ refit on the same folds. Nothing was retrained or reselected, and the same tests
         ICC(2,1)~\cite{shrout1979icc,koo2016icc} and Lin's concordance correlation~\cite{lin1989ccc}. Only the 50
         classification validation and test patients count, because the backbone's predicted masks are nearly
         perfect on its own training patients.
+  \item \emph{Subgroups.} Late-fusion macro AUC (XGBoost and logistic regression) by sex and by age band (under 40,
+        40--59, 60 and over) on the out-of-fold predictions, with patient-level bootstrap CIs. No AUC is given where a
+        class has fewer than five patients in the subgroup. Age varies less within a band, so these also show what
+        imaging contributes when age has less to offer. For the binary tasks we also scored patients by age directly,
+        with no model, as a reference.
+\end{itemize}
+
+\subsection{Post hoc checks}
+\label{sec:posthoc}
+The two checks below were added after the results above were known, and are exploratory.
+\begin{itemize}
+  \item \emph{Validation--test gap.} Is a model's gap between validation and test AUC larger than chance assignment of
+        patients to the two splits would give? Each model's per-patient probabilities were held fixed and the 50
+        patients were re-assigned at random to two groups, within each class, so that the group sizes and class mix
+        stayed the same (10,000 re-assignments, two-sided permutation $p$~\cite{phipson2010permutation}, Holm
+        correction within each task and family of models). The checkpoints were selected on the validation patients,
+        which if anything favours validation. For a like-for-like reference, late fusion was fit on the same 112
+        training patients as the end-to-end models. The same re-assignments served every model of a task, so each
+        end-to-end model of the main ladder could also be compared with late fusion on the same inputs (Holm within
+        each task).
+  \item \emph{Shuffled-label control.} On shuffled labels no real association exists, so the AUC must be 0.5 unless
+        information leaks~\cite{ojala2010permutation}. We ran 100 permutations for diagnosis, LGG versus HGG and IDH
+        status, with XGBoost and logistic regression on radiomics (102 features, recursive elimination to 30) and on
+        deep features (1,392 features, ANOVA to 32), in one 5-fold pass per permutation. Each was fit two ways: with
+        the imputer, scaler and selector fit inside each training fold, as everywhere in this study, and with them fit
+        once on all patients before the folds, the common mistake. The real labels went through the same two
+        procedures on the 50 folds of the main CV.
 \end{itemize}
 
 % ---------------------------------------------------------------------------------------------------------
 \section{Results}
-\todo{All end-to-end and segmentation results are one seed (42). Replace with mean $\pm$ SD over seeds 42--44 once
-those runs finish; the tables are regenerated by \texttt{scripts/aggregate\_results.py}.}
+All end-to-end and segmentation results are from one seed. Late-fusion results are means over the 50 CV folds.
 
 \subsection{Segmentation}
 \begin{table}[t]
@@ -423,7 +466,7 @@ Dice 0.5.}
 \end{figure}
 
 \subsection{What leaky inputs would explain}
-With the full clinical vector and no imaging at all, XGBoost reached a CV diagnosis AUC of $0.929 \pm 0.022$
+With the full clinical vector and no imaging at all, XGBoost reached a CV diagnosis AUC of $0.930 \pm 0.022$
 (logistic regression $0.949 \pm 0.023$) and IDH AUC 1.000 (Table~\ref{tab:kfold}). End to end, the leaky reference
 with radiomics reached a test diagnosis balanced accuracy of 0.944 (0.857--1.000) and AUC 0.975
 (Table~\ref{tab:cls}). Such numbers therefore need no imaging, and every comparison below excludes these variables.
@@ -467,7 +510,7 @@ $0.113$; $p = 0.14$, Holm-adjusted 0.57). Adding the clinical token gave $+0.070
 $0.152$; $p = 0.10$). Among the pre-specified comparisons (Section~\ref{sec:stats}), none was significant after Holm
 correction for any task. The largest difference was the Trinity design's deficit against the ladder model with the
 same inputs (diagnosis $-0.127$, $-0.238$ to $-0.017$; $p = 0.019$, adjusted 0.11).
-\todo{supplement table: \texttt{paper\_tables/classification\_tests}; update with three seeds.}
+\todo{supplement table: \texttt{paper\_tables/classification\_tests}.}
 
 The weaker models' balanced accuracies are low despite reasonable AUCs because their calls collapse onto the two
 large classes (Fig.~\ref{fig:cm}):
@@ -518,41 +561,121 @@ XGBoost. Majority class: 0.500 for every task. ``Image'' = label-free deep featu
 \toprule
 Features & Grade & Diagnosis & LGG vs HGG & IDH \\
 \midrule
-Age + sex & $0.570 \pm 0.048$ & $0.650 \pm 0.044$ & $0.660 \pm 0.082$ & $0.847 \pm 0.056$ \\
-Clinical & $0.562 \pm 0.050$ & $0.648 \pm 0.043$ & $0.657 \pm 0.081$ & $0.837 \pm 0.056$ \\
-Radiomics & $0.742 \pm 0.061$ & $0.797 \pm 0.061$ & $0.793 \pm 0.077$ & $0.821 \pm 0.059$ \\
-Clinical + radiomics & $\mathbf{0.765 \pm 0.059}$ & $\mathbf{0.836 \pm 0.053}$ & $\mathbf{0.828 \pm 0.059}$ & $0.898 \pm 0.045$ \\
-Image & $0.692 \pm 0.056$ & $0.751 \pm 0.049$ & $0.783 \pm 0.086$ & $0.818 \pm 0.067$ \\
-Image + clinical & $0.701 \pm 0.059$ & $0.803 \pm 0.050$ & $0.797 \pm 0.074$ & $0.905 \pm 0.047$ \\
-Image + clinical + radiomics & $0.747 \pm 0.051$ & $0.835 \pm 0.047$ & $0.823 \pm 0.075$ & $\mathbf{0.906 \pm 0.051}$ \\
+Age + sex & $0.569 \pm 0.047$ & $0.649 \pm 0.044$ & $0.656 \pm 0.082$ & $0.846 \pm 0.058$ \\
+Clinical & $0.564 \pm 0.049$ & $0.652 \pm 0.045$ & $0.653 \pm 0.080$ & $0.839 \pm 0.057$ \\
+Radiomics & $0.736 \pm 0.064$ & $0.790 \pm 0.062$ & $0.795 \pm 0.079$ & $0.823 \pm 0.063$ \\
+Clinical + radiomics & $\mathbf{0.762 \pm 0.059}$ & $0.830 \pm 0.051$ & $\mathbf{0.829 \pm 0.063}$ & $0.899 \pm 0.045$ \\
+Image & $0.692 \pm 0.058$ & $0.751 \pm 0.048$ & $0.786 \pm 0.085$ & $0.822 \pm 0.069$ \\
+Image + clinical & $0.704 \pm 0.059$ & $0.803 \pm 0.048$ & $0.798 \pm 0.073$ & $\mathbf{0.907 \pm 0.048}$ \\
+Image + clinical + radiomics & $0.748 \pm 0.051$ & $\mathbf{0.831 \pm 0.046}$ & $0.819 \pm 0.076$ & $0.906 \pm 0.048$ \\
 \midrule
 \multicolumn{5}{l}{\emph{Leaky reference (post-operative molecular and surgical data)}} \\
-Full clinical vector & $0.738 \pm 0.055$ & $0.929 \pm 0.022$ & $0.863 \pm 0.036$ & $1.000 \pm 0.000$ \\
-Molecular + surgical & $0.741 \pm 0.058$ & $0.946 \pm 0.025$ & $0.905 \pm 0.039$ & $1.000 \pm 0.000$ \\
-Image + full clinical & $0.799 \pm 0.052$ & $0.945 \pm 0.024$ & $0.904 \pm 0.045$ & $1.000 \pm 0.000$ \\
-Image + full clinical + radiomics & $0.808 \pm 0.048$ & $0.957 \pm 0.019$ & $0.910 \pm 0.047$ & $1.000 \pm 0.000$ \\
+Full clinical vector & $0.737 \pm 0.056$ & $0.930 \pm 0.022$ & $0.862 \pm 0.035$ & $1.000 \pm 0.000$ \\
+Molecular + surgical & $0.740 \pm 0.057$ & $0.944 \pm 0.025$ & $0.905 \pm 0.037$ & $1.000 \pm 0.000$ \\
+Image + full clinical & $0.796 \pm 0.051$ & $0.944 \pm 0.023$ & $0.905 \pm 0.044$ & $1.000 \pm 0.000$ \\
+Image + full clinical + radiomics & $0.811 \pm 0.043$ & $0.956 \pm 0.019$ & $0.910 \pm 0.046$ & $1.000 \pm 0.000$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Repeated CV gives the more reliable comparison (Table~\ref{tab:kfold}). Hand-crafted radiomics carried most of the
-imaging signal: radiomics alone beat the deep features for grade, diagnosis and LGG/HGG. Adding the deep features to
-clinical + radiomics did not help (diagnosis $0.835$ against $0.836$; grade $0.747$ against $0.765$; LGG/HGG $0.823$
-against $0.828$). \todo{corrected $t$-test results from \texttt{paper\_tables/kfold\_tests} once \texttt{kfold}
-has rerun with per-fold scores.} Logistic regression gave the same picture (diagnosis: clinical + radiomics $0.831$,
-image + clinical + radiomics $0.810$).
+\begin{table}[t]
+\centering
+\caption{Pre-specified late-fusion comparisons over the 50 CV folds: difference in macro AUC, with the corrected
+resampled $t$-test $p$ in brackets, Holm-adjusted within each task and model. ``Deep'' = deep features.}
+\label{tab:kfoldtests}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Comparison & Grade & Diagnosis & LGG vs HGG & IDH \\
+\midrule
+\multicolumn{5}{l}{\emph{XGBoost}} \\
+Radiomics added to clinical & $+0.198$ ($<0.001$) & $+0.178$ ($<0.001$) & $+0.176$ (0.004) & $+0.060$ (0.0502) \\
+Deep added to clinical & $+0.140$ ($<0.001$) & $+0.150$ ($<0.001$) & $+0.145$ (0.020) & $+0.068$ (0.058) \\
+Deep added to clinical + radiomics & $-0.014$ (0.54) & $+0.000$ (0.99) & $-0.010$ (1) & $+0.007$ (1) \\
+Radiomics against deep & $+0.044$ (0.54) & $+0.039$ (0.58) & $+0.008$ (1) & $+0.001$ (1) \\
+\midrule
+\multicolumn{5}{l}{\emph{Logistic regression}} \\
+Radiomics added to clinical & $+0.074$ (0.21) & $+0.103$ (0.004) & $+0.059$ (0.79) & $-0.005$ (1) \\
+Deep added to clinical & $+0.043$ (0.69) & $+0.076$ (0.046) & $+0.048$ (0.79) & $+0.015$ (1) \\
+Deep added to clinical + radiomics & $-0.017$ (0.69) & $-0.023$ (0.42) & $-0.015$ (1) & $+0.008$ (1) \\
+Radiomics against deep & $+0.040$ (0.69) & $+0.043$ (0.42) & $+0.015$ (1) & $-0.001$ (1) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-For IDH status, age and sex alone reached $0.847$ (XGBoost) and $0.895$ (logistic regression). The best imaging model
-added at most 0.06 AUC (0.906; logistic regression image + clinical also 0.906).
+Repeated CV gives the more reliable comparison (Tables~\ref{tab:kfold} and~\ref{tab:kfoldtests}). For diagnosis,
+imaging added to clinical variables with both classifiers and both encodings: radiomics by 0.178 (XGBoost) and 0.103
+(logistic regression), deep features by 0.150 and 0.076, all significant after correction. For grade and LGG/HGG the
+gain depended on the classifier. It was significant for XGBoost and not for logistic regression, largely because
+XGBoost handled the clinical variables alone much worse (grade 0.564 against 0.648, LGG/HGG 0.653 against 0.746). The
+highest AUCs for these two tasks still came from XGBoost (0.762 and 0.829, against 0.722 and 0.804).
 
-\todo{learning curves (\texttt{paper\_tables/learning\_curves}, \texttt{learning\_curve\_<task>.png}): do the deep
-features close the gap to radiomics as the training set grows? Calibration and decision curves of late fusion
-(\texttt{calibration\_late\_fusion}, \texttt{calibration\_<task>.png}, \texttt{decision\_curve\_<task>.png}) for
-LGG/HGG and IDH, against treating all or none.}
+The two encodings of the images overlapped. Adding deep features to clinical + radiomics gained nothing (XGBoost
+diagnosis $0.831$ against $0.830$; logistic regression $0.807$ against $0.830$). Radiomics alone scored higher than deep
+features alone for grade, diagnosis and LGG/HGG, but none of these differences was significant.
+
+For IDH status, age and sex alone reached $0.846$ (XGBoost) and $0.895$ (logistic regression). The best imaging models,
+image + clinical with either classifier, reached 0.907 and 0.906, which is 0.06 and 0.01 above age and sex. No gain
+over clinical variables survived correction (Table~\ref{tab:kfoldtests}).
+
+\paragraph{Learning curves.} More training patients did not help age + sex. From about 32 to 130 training patients, its
+diagnosis AUC stayed at 0.725--0.713 with logistic regression and 0.664--0.645 with XGBoost (Fig.~\ref{fig:learning}).
+Imaging did gain: radiomics rose from 0.702 to 0.783 (XGBoost) and from 0.722 to 0.798 (logistic regression), and deep
+features from 0.651 and 0.679 to 0.749 with both. At about 32 patients, age + sex by logistic regression still matched
+radiomics for diagnosis (0.725 against 0.722), and radiomics passed it only from about 65. For IDH, the same age + sex
+model (0.895--0.897 at every size) stayed above radiomics or deep features alone at every size (at most 0.825).
+
+Deep features did not clearly catch up with radiomics as the training set grew. With XGBoost, radiomics led by
+0.051, 0.039, 0.046 and 0.034 for diagnosis and by 0.023, 0.053, 0.070 and 0.040 for grade across the four sizes. For
+LGG/HGG and IDH the lead was gone at the full size ($-0.001$ and $-0.003$). The SDs over the test folds, 0.05--0.10 at
+the full size, are larger than any of these differences. The XGBoost diagnosis curves flatten between about 97 and 130
+patients, whereas logistic regression was still rising, so we cannot say that 130 patients exhaust what T2 offers.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.49\textwidth}\centering
+  \includegraphics[width=\textwidth]{learning_curve_diagnosis.png}
+  \caption{WHO~2021 diagnosis.}
+\end{subfigure}
+\begin{subfigure}{0.49\textwidth}\centering
+  \includegraphics[width=\textwidth]{learning_curve_idh.png}
+  \caption{IDH status.}
+\end{subfigure}
+\caption{Late-fusion macro AUC against training-set size (XGBoost; mean $\pm$ SD over 20 test folds). Every feature set
+saw the same subsamples, and the test folds were not subsampled.}
+\label{fig:learning}
+\end{figure}
+
+\paragraph{Calibration and decision curves.} On the out-of-fold predictions the Brier score of late fusion
+(multi-class form, so a constant at the cohort's prevalence scores 0.48 for LGG/HGG and 0.50 for IDH) improved with
+imaging for LGG/HGG: age + sex 0.526 (XGBoost) and 0.407 (logistic regression), clinical + radiomics 0.338 and 0.341.
+For IDH it did not move much: age + sex 0.291 and 0.265, image + clinical + radiomics 0.262 and 0.266. ECE was 0.07--0.17
+across the five feature sets drawn in Fig.~\ref{fig:decision}. The decision curves show the same picture
+(Fig.~\ref{fig:decision}). For LGG/HGG, the models with clinical + radiomics gave the highest net benefit above a
+threshold of about 0.25, ahead of age + sex with either classifier. For IDH, every XGBoost model beat treating everyone
+above a threshold of about 0.2, but imaging gave little: image + clinical + radiomics led age + sex (logistic regression)
+by at most 0.02 below a threshold of 0.45 and fell behind it above 0.5, and radiomics or deep features alone stayed below
+it from 0.2. These curves inherit the cohort's designed prevalence (39\% grade 4, 50\% IDH-wildtype), so they compare the
+models with each other and do not predict clinical benefit.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.49\textwidth}\centering
+  \includegraphics[width=\textwidth]{decision_curve_lgg_hgg.png}
+  \caption{LGG versus HGG.}
+\end{subfigure}
+\begin{subfigure}{0.49\textwidth}\centering
+  \includegraphics[width=\textwidth]{decision_curve_idh.png}
+  \caption{IDH status.}
+\end{subfigure}
+\caption{Decision curves of late fusion (XGBoost, plus age + sex by logistic regression as a no-imaging reference;
+out-of-fold predictions of all 162 patients). The prevalence is that of the balanced cohort.}
+\label{fig:decision}
+\end{figure}
 
 The one-shot hold-out on the 25 test patients agreed within its wide intervals:
 \begin{itemize}
-  \item XGBoost diagnosis AUC: clinical + radiomics 0.787 [0.63, 0.96], image + clinical + radiomics 0.848 [0.73, 0.94];
+  \item XGBoost diagnosis AUC: clinical + radiomics 0.790 [0.63, 0.97], image + clinical + radiomics 0.861 [0.74, 0.96];
   \item IDH AUC: age + sex 0.926 [0.76, 1.00].
 \end{itemize}
 \todo{full hold-out table in the supplement.}
@@ -560,7 +683,7 @@ The one-shot hold-out on the 25 test patients agreed within its wide intervals:
 TreeSHAP on the image + clinical + radiomics XGBoost ranked age first for diagnosis, ahead of any deep or radiomics
 feature (Fig.~\ref{fig:shap}). The leading radiomics features were the 10th-percentile intensity and GLCM sum
 entropy, a measure of texture heterogeneity. The 32 selected deep features and the 30 selected radiomics features
-contributed similarly, in total (1.81 and 1.61) and per feature (0.057 and 0.054), against 0.36 for age alone. XGBoost
+contributed similarly, in total (1.78 and 1.61) and per feature (0.056 and 0.054), against 0.35 for age alone. XGBoost
 thus uses the deep features when they are offered, yet CV shows no gain from adding them, so they appear to be
 largely redundant with the radiomics rather than complementary.
 
@@ -572,38 +695,171 @@ validation). \texttt{num\_\_}: clinical, \texttt{deep\_\_}: deep features, \text
 \label{fig:shap}
 \end{figure}
 
-\subsection{How reliable is a 25-patient test split?}
+\subsection{Subgroups: does imaging add anything beyond age?}
 \begin{table}[t]
 \centering
-\caption{Validation against test performance of the selected checkpoints, for diagnosis (macro AUC and balanced
-accuracy). Both splits have 25 patients, the same class mix, and the same transforms and predicted-mask crops.}
-\label{tab:valtest}
+\caption{Late-fusion macro AUC by age band and sex (out-of-fold predictions, 95\% bootstrap CIs). LR: logistic regression.
+``Image'': deep features. ``Age itself'': patients scored by age directly, with no model (binary tasks only). A dash marks
+a subgroup in which a class has fewer than five patients. Descriptive only: no comparison was tested.}
+\label{tab:subgroups}
 \small
-\begin{tabular}{lcccc}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccc}
 \toprule
- & \multicolumn{2}{c}{AUC} & \multicolumn{2}{c}{Balanced accuracy} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}
-Model & Validation & Test & Validation & Test \\
+ & Under 40 ($n=53$) & 40--59 ($n=62$) & 60 and over ($n=47$) & Female ($n=63$) & Male ($n=99$) \\
 \midrule
-Image only & 0.381 & 0.799 & 0.232 & 0.364 \\
-Image + clinical & 0.671 & 0.869 & 0.389 & 0.457 \\
-Image + clinical + radiomics & 0.619 & 0.916 & 0.288 & 0.744 \\
-SegMamba-v3 & 0.755 & 0.892 & 0.562 & 0.757 \\
-Leaky reference & 0.870 & 0.969 & 0.444 & 0.882 \\
-Leaky reference + radiomics & 0.918 & 0.975 & 0.708 & 0.944 \\
+\multicolumn{6}{l}{\emph{Grade}} \\
+Age + sex, LR & 0.377\ci{0.26}{0.50} & 0.590\ci{0.48}{0.70} & 0.400\ci{0.25}{0.55} & 0.633\ci{0.54}{0.73} & 0.636\ci{0.56}{0.71} \\
+Radiomics, XGBoost & 0.630\ci{0.53}{0.74} & 0.727\ci{0.62}{0.83} & 0.638\ci{0.51}{0.76} & 0.742\ci{0.64}{0.83} & 0.671\ci{0.59}{0.74} \\
+Radiomics, LR & 0.668\ci{0.54}{0.78} & 0.711\ci{0.60}{0.81} & 0.586\ci{0.45}{0.73} & 0.701\ci{0.59}{0.81} & 0.692\ci{0.62}{0.77} \\
+Image, XGBoost & 0.688\ci{0.57}{0.80} & 0.672\ci{0.56}{0.78} & 0.575\ci{0.45}{0.70} & 0.686\ci{0.58}{0.79} & 0.675\ci{0.60}{0.76} \\
+Image, LR & 0.601\ci{0.47}{0.72} & 0.640\ci{0.53}{0.74} & 0.595\ci{0.46}{0.74} & 0.651\ci{0.54}{0.76} & 0.642\ci{0.56}{0.73} \\
+\midrule
+\multicolumn{6}{l}{\emph{Diagnosis}} \\
+Age + sex, LR & -- & 0.611\ci{0.52}{0.71} & -- & 0.683\ci{0.59}{0.77} & 0.722\ci{0.66}{0.78} \\
+Radiomics, XGBoost & -- & 0.764\ci{0.67}{0.85} & -- & 0.762\ci{0.67}{0.85} & 0.791\ci{0.71}{0.86} \\
+Radiomics, LR & -- & 0.774\ci{0.69}{0.86} & -- & 0.793\ci{0.71}{0.87} & 0.795\ci{0.71}{0.87} \\
+Image, XGBoost & -- & 0.736\ci{0.64}{0.82} & -- & 0.724\ci{0.63}{0.81} & 0.769\ci{0.69}{0.85} \\
+Image, LR & -- & 0.718\ci{0.63}{0.80} & -- & 0.675\ci{0.56}{0.78} & 0.759\ci{0.69}{0.82} \\
+\midrule
+\multicolumn{6}{l}{\emph{LGG vs HGG}} \\
+Age itself & 0.499\ci{0.29}{0.71} & 0.652\ci{0.51}{0.79} & 0.456\ci{0.28}{0.63} & 0.784\ci{0.65}{0.89} & 0.742\ci{0.64}{0.84} \\
+Age + sex, LR & 0.453\ci{0.26}{0.65} & 0.618\ci{0.48}{0.76} & 0.481\ci{0.29}{0.67} & 0.768\ci{0.63}{0.88} & 0.721\ci{0.62}{0.82} \\
+Radiomics, XGBoost & 0.733\ci{0.56}{0.89} & 0.798\ci{0.67}{0.91} & 0.704\ci{0.54}{0.84} & 0.738\ci{0.59}{0.86} & 0.828\ci{0.74}{0.90} \\
+Radiomics, LR & 0.661\ci{0.40}{0.90} & 0.810\ci{0.68}{0.92} & 0.729\ci{0.57}{0.87} & 0.700\ci{0.54}{0.83} & 0.853\ci{0.76}{0.92} \\
+Image, XGBoost & 0.786\ci{0.60}{0.95} & 0.713\ci{0.57}{0.84} & 0.729\ci{0.57}{0.86} & 0.690\ci{0.54}{0.82} & 0.810\ci{0.72}{0.89} \\
+Image, LR & 0.711\ci{0.50}{0.89} & 0.682\ci{0.53}{0.83} & 0.688\ci{0.53}{0.84} & 0.715\ci{0.56}{0.85} & 0.757\ci{0.66}{0.85} \\
+\midrule
+\multicolumn{6}{l}{\emph{IDH}} \\
+Age itself & -- & 0.762\ci{0.62}{0.88} & 0.569\ci{0.31}{0.81} & 0.868\ci{0.76}{0.95} & 0.912\ci{0.85}{0.96} \\
+Age + sex, LR & -- & 0.730\ci{0.58}{0.86} & 0.557\ci{0.29}{0.84} & 0.855\ci{0.74}{0.95} & 0.903\ci{0.84}{0.96} \\
+Radiomics, XGBoost & -- & 0.746\ci{0.60}{0.87} & 0.638\ci{0.33}{0.89} & 0.774\ci{0.64}{0.88} & 0.866\ci{0.79}{0.93} \\
+Radiomics, LR & -- & 0.715\ci{0.57}{0.86} & 0.524\ci{0.36}{0.69} & 0.733\ci{0.59}{0.85} & 0.827\ci{0.74}{0.90} \\
+Image, XGBoost & -- & 0.768\ci{0.65}{0.87} & 0.667\ci{0.40}{0.91} & 0.753\ci{0.63}{0.86} & 0.857\ci{0.78}{0.92} \\
+Image, LR & -- & 0.752\ci{0.62}{0.87} & 0.710\ci{0.44}{0.93} & 0.784\ci{0.67}{0.89} & 0.837\ci{0.76}{0.91} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Age dominates many of the results above, so we asked what imaging does when age varies less (Table~\ref{tab:subgroups}).
+Age keeps some signal inside a band. Used directly as the score, it reached 0.65 for LGG/HGG and 0.76 for IDH at 40--59,
+but only 0.50 and 0.46 for LGG/HGG in the other two bands and 0.57 for IDH at 60 and over. Logistic regression on age +
+sex came close to these values. XGBoost on age + sex did not: it fell as low as 0.17 (LGG/HGG at 60 and over), far below
+age itself. This is most likely an artefact of a flexible model on one near-discrete feature with little signal on
+held-out patients, not a real reverse effect, and it may also contribute to XGBoost's weak clinical baseline in
+Table~\ref{tab:kfold}. We therefore use logistic regression as the age + sex reference here.
+
+For grade, diagnosis and LGG/HGG, radiomics and deep features scored above that reference in every band, with both
+classifiers. Their confidence intervals excluded 0.5 in 13 of 14 combinations of task, band and encoding for XGBoost and
+9 of 14 for logistic regression. For these tasks the T2 signal is therefore not merely a proxy for age. For IDH we could
+not show this. At 40--59, radiomics and deep features (XGBoost 0.746 and 0.768, logistic regression 0.715 and 0.752)
+were level with age + sex (0.730) and age itself (0.762). At 60 and over there are only five IDH-mutant patients, and
+the intervals are too wide to tell.
+
+By sex, the intervals overlapped in every comparison. With imaging alone, point estimates were lower in women for
+LGG/HGG and IDH in all eight comparisons (by 0.04--0.15), lower or equal for diagnosis (by 0.00--0.08), and similar or
+higher for grade. With 63 women and 99 men, and no test applied, we cannot tell whether these differences are real.
+
+\subsection{Shuffled-label control}
+\begin{table}[t]
+\centering
+\caption{Late fusion on shuffled and real labels. Shuffled: mean $\pm$ SD of macro AUC over 100 permutations, one 5-fold
+pass each. Real: the 50 folds of the main CV. ``Inside'': imputer, scaler and selector fit inside each training fold,
+as everywhere in this study. ``Before'': fit once on all patients before the folds.}
+\label{tab:control}
+\small
+\begin{tabular}{lllcccc}
+\toprule
+ & & & \multicolumn{2}{c}{Shuffled labels} & \multicolumn{2}{c}{Real labels} \\
+\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+Task & Features & Model & Inside & Before & Inside & Before \\
+\midrule
+Diagnosis & Radiomics & Log. reg. & $0.500 \pm 0.043$ & $0.511 \pm 0.046$ & 0.799 & 0.813 \\
+ & & XGBoost & $0.492 \pm 0.047$ & $0.523 \pm 0.051$ & 0.790 & 0.815 \\
+ & Deep & Log. reg. & $0.498 \pm 0.048$ & $0.574 \pm 0.043$ & 0.756 & 0.807 \\
+ & & XGBoost & $0.497 \pm 0.050$ & $0.570 \pm 0.047$ & 0.751 & 0.794 \\
+\midrule
+LGG vs HGG & Radiomics & Log. reg. & $0.499 \pm 0.061$ & $0.513 \pm 0.066$ & 0.781 & 0.801 \\
+ & & XGBoost & $0.499 \pm 0.069$ & $0.558 \pm 0.071$ & 0.795 & 0.823 \\
+ & Deep & Log. reg. & $0.498 \pm 0.055$ & $0.576 \pm 0.053$ & 0.766 & 0.800 \\
+ & & XGBoost & $0.506 \pm 0.052$ & $0.575 \pm 0.054$ & 0.786 & 0.820 \\
+\midrule
+IDH & Radiomics & Log. reg. & $0.504 \pm 0.063$ & $0.517 \pm 0.067$ & 0.816 & 0.832 \\
+ & & XGBoost & $0.505 \pm 0.060$ & $0.555 \pm 0.057$ & 0.823 & 0.847 \\
+ & Deep & Log. reg. & $0.495 \pm 0.065$ & $0.577 \pm 0.054$ & 0.816 & 0.831 \\
+ & & XGBoost & $0.499 \pm 0.061$ & $0.567 \pm 0.055$ & 0.822 & 0.826 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Every end-to-end model scored much lower on the validation split than on the test split (Table~\ref{tab:valtest}).
-The two splits have nearly the same composition: 9 glioblastomas, 10--11 IDH-mutant astrocytomas, 3--4
-IDH-wildtype astrocytomas and 2 oligodendrogliomas each, with median ages of 52 and 47 years. Their processing is
-identical, and the checkpoint was selected on validation loss, which should favour validation, not test.
+On shuffled labels the pipeline as used in this study scored a mean macro AUC of 0.492--0.506 in all 12 configurations
+(Table~\ref{tab:control}), so it shows no sign of leakage. Fitting the same steps before the folds gave 0.567--0.577
+with the 1,392 deep features and 0.511--0.558 with the 102 radiomics features, on labels with no signal. On real labels
+the same mistake inflated macro AUC by 0.004--0.051. That is the size of the differences between feature sets reported
+above: radiomics and deep features differ by 0.039 for XGBoost diagnosis. No shuffled run reached the real-label result
+in any configuration ($p = 1/101$, the smallest possible with 100 permutations).
 
-The gap is therefore split-to-split variance. The test split is probably on the easy side, consistent with the
-late-fusion hold-out mostly scoring at or above CV. For the best end-to-end model the validation diagnosis balanced
-accuracy at the selected epoch was 0.29, barely above chance, against 0.74 on test. A ranking of models by one such
-split is not reliable~\cite{varoquaux2018cv}.
+\subsection{How reliable is a 25-patient test split?}
+\begin{table}[t]
+\centering
+\caption{Validation against test macro AUC for diagnosis. Both splits have 25 patients and the same class mix. Gap:
+test minus validation. Chance: 95\% range of the gap under 10,000 random re-assignments of the 50 patients within
+class, with each model's probabilities held fixed. $p$: two-sided permutation test. Adjusted: Holm within each family.
+Late fusion was fit on the same 112 training patients as the end-to-end models.}
+\label{tab:valtest}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Model & Validation & Test & Gap & Chance & $p$ & Adjusted \\
+\midrule
+\multicolumn{7}{l}{\emph{End to end}} \\
+Image only & 0.381 & 0.799 & $+0.418$ & $-0.252$ to $+0.250$ & 0.0006 & 0.0054 \\
+Image + clinical & 0.671 & 0.869 & $+0.198$ & $-0.208$ to $+0.210$ & 0.066 & 0.33 \\
+Image + clinical + radiomics & 0.619 & 0.916 & $+0.297$ & $-0.228$ to $+0.221$ & 0.0067 & 0.054 \\
+Cascade & 0.742 & 0.857 & $+0.116$ & $-0.197$ to $+0.190$ & 0.40 & 0.79 \\
+Multi-scale & 0.484 & 0.804 & $+0.321$ & $-0.261$ to $+0.252$ & 0.013 & 0.093 \\
+Trinity & 0.563 & 0.788 & $+0.225$ & $-0.233$ to $+0.225$ & 0.053 & 0.32 \\
+SegMamba-v3 & 0.755 & 0.892 & $+0.137$ & $-0.202$ to $+0.201$ & 0.26 & 0.77 \\
+Leaky reference & 0.870 & 0.969 & $+0.099$ & $-0.126$ to $+0.124$ & 0.17 & 0.69 \\
+Leaky reference + radiomics & 0.918 & 0.975 & $+0.057$ & $-0.101$ to $+0.103$ & 0.54 & 0.79 \\
+\midrule
+\multicolumn{7}{l}{\emph{Late fusion (XGBoost)}} \\
+Age + sex & 0.562 & 0.794 & $+0.232$ & $-0.221$ to $+0.198$ & 0.029 & 0.17 \\
+Radiomics & 0.764 & 0.771 & $+0.007$ & $-0.236$ to $+0.235$ & 0.95 & 1 \\
+Image & 0.588 & 0.755 & $+0.167$ & $-0.234$ to $+0.223$ & 0.16 & 0.64 \\
+Image + clinical & 0.657 & 0.832 & $+0.175$ & $-0.215$ to $+0.202$ & 0.10 & 0.51 \\
+Clinical + radiomics & 0.847 & 0.835 & $-0.012$ & $-0.187$ to $+0.183$ & 0.91 & 1 \\
+Image + clinical + radiomics & 0.791 & 0.846 & $+0.056$ & $-0.189$ to $+0.183$ & 0.56 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Every end-to-end model scored lower on the validation split than on the test split for diagnosis
+(Table~\ref{tab:valtest}), and the image-only model's validation AUC of 0.381 was below chance. The two splits have
+nearly the same composition: 9 glioblastomas, 10--11 IDH-mutant astrocytomas, 3--4 IDH-wildtype astrocytomas and 2
+oligodendrogliomas each, with median ages of 52 and 47 years. The checkpoint was selected on validation loss, which
+should favour validation, not test. For the best end-to-end model the validation diagnosis balanced accuracy at the
+selected epoch was 0.29, barely above chance, against 0.74 on test.
+
+Chance explains much of this. Merely re-assigning patients between two such splits gives gaps with a 95\% range of
+about $\pm 0.2$ for most diagnosis models and up to $\pm 0.35$ for LGG/HGG, with no change to any model. Most observed
+gaps lie inside that range, and none of the 48 late-fusion gaps survived correction in any task. Gaps favoured the test
+split in 24 of 27 end-to-end comparisons, 22 of 24 for XGBoost and 15 of 24 for logistic regression. These share
+patients and are not independent, but together they suggest that the test split is somewhat easier.
+
+Chance does not explain everything. The image-only diagnosis gap of $+0.418$ fell outside the chance range and stayed
+significant even when corrected across all 75 gap tests (adjusted $p = 0.045$). The image + clinical + radiomics gap
+was borderline (adjusted $p = 0.054$). On the same patients and inputs, the end-to-end gap was larger than the
+late-fusion gap for image only ($+0.252$, adjusted $p = 0.0051$) and image + clinical + radiomics ($+0.241$, adjusted
+$p = 0.037$), but not for image + clinical ($+0.023$, $p = 0.77$). Image only pointed the same way for grade ($+0.298$,
+adjusted $p = 0.11$) and LGG/HGG ($+0.273$, adjusted $p = 0.098$). Part of the instability therefore belongs to the
+end-to-end models rather than to the patients. Mask quality does not explain it, since the backbone's Dice was higher on
+the validation patients (0.885) than on the test patients (0.791).
+\todo{Re-scoring on Colab: \texttt{run("cls explain")} writes \texttt{predictions\_val.csv} from the saved checkpoints,
+through the test code path, and \texttt{paper\_tables/validation\_recheck} compares it with the scores above. If they
+agree, say so here: the low validation scores are real. If not, correct this table and section.}
+
+Either way, a ranking of models by one such split is not reliable~\cite{varoquaux2018cv}.
 
 \subsection{Error analysis}
 High-grade recall was 0.7--0.8 for every model because the same patients were missed. Two glioblastomas were called
@@ -659,20 +915,39 @@ expected: IDH and 1p/19q define three of the four WHO~2021 classes. Inputs that 
 only known after surgery, have no place in a model that claims to predict from pre-operative
 MRI~\cite{kapoor2023leakage}. Where they are used, they should be reported as such.
 
-\paragraph{What imaging adds.} Without leakage, T2 imaging clearly carries information about diagnosis and grade
-beyond age and sex (XGBoost diagnosis CV AUC 0.84 against 0.65). Hand-crafted radiomics captured nearly all of it,
-and deep features from the segmentation backbone added nothing on top. This is consistent with tree ensembles on
-engineered features being strong on small tabular problems~\cite{grinsztajn2022tree}. It is not evidence that
-decoupled pipelines are inherently superior: the end-to-end model with radiomics was competitive on the test split.
-For IDH, age alone is a strong baseline because IDH-wildtype glioblastoma patients are older, and any radiogenomic
-claim should be measured against it.
+\paragraph{What imaging adds.} Without leakage, T2 imaging carries information about diagnosis beyond clinical
+variables (CV AUC 0.83 against 0.65 with XGBoost and 0.73 with logistic regression), with both classifiers and both
+encodings. For grade and LGG/HGG, the gain depended on the classifier. Radiomics and deep features from the segmentation backbone were largely interchangeable.
+Each added to clinical variables, deep features added nothing once radiomics were present, and radiomics were not
+significantly better than deep features alone. On this cohort we thus find no reason to prefer the costlier deep
+encoder, but also no evidence that it is worse. Age and sex saturated from about 32 training patients while imaging kept
+gaining, so these comparisons may shift in larger cohorts. The strength of tree ensembles on engineered features on small tabular
+problems~\cite{grinsztajn2022tree} fits this picture. It is not evidence that decoupled pipelines are inherently
+superior: the end-to-end model with radiomics scored highest on the test split, although far lower on validation.
 
-\paragraph{Evaluation.} With 25 test patients a balanced-accuracy CI spans about $\pm 0.2$, and our validation and
-test splits, drawn from the same distribution, disagreed by up to 0.42 AUC. Single-split results at this size are
-illustrative. Model comparisons need repeated CV, several seeds, and preferably an external
-cohort~\cite{varoquaux2018cv,varoquaux2022failures}. On our test split, no pre-specified difference between the
-end-to-end models was significant after correction, including the radiomics token that seemed to lift diagnosis
-balanced accuracy by 0.29.
+The subgroups add what pooled AUCs cannot show. For grade, diagnosis and LGG/HGG, radiomics and deep features stayed
+above age and sex inside every age band, so the imaging signal is not merely a proxy for age. IDH status was the
+exception. Age alone is a strong baseline there, because IDH-wildtype glioblastoma patients are older. Imaging gained
+nothing significant over clinical variables in the pooled cohort and was level with age inside the one age band large
+enough to tell, so T2 radiogenomic claims for IDH should be measured against age, also within age bands. Baselines need
+care too: XGBoost on age and sex scored far below age itself, so a gain measured against a weak baseline can overstate
+what imaging adds.
+
+\paragraph{Evaluation.} With 25 test patients a balanced-accuracy CI spans about $\pm 0.2$. Re-assigning patients at
+random between our two splits, of the same size and class mix, moved the diagnosis gap by about $\pm 0.2$ AUC with no
+change to any model. A difference of that size between two models, or two studies, on one such split says little.
+Single-split results at this size are illustrative. Model comparisons need repeated CV, several seeds, and preferably
+an external cohort~\cite{varoquaux2018cv,varoquaux2022failures}. On our test split, no pre-specified difference between
+the end-to-end models was significant after correction, including the radiomics token that seemed to lift diagnosis
+balanced accuracy by 0.29. The largest gaps went beyond chance and were specific to end-to-end models: late fusion on
+the same patients and inputs was more stable. A plausible reading is that end-to-end training on 112 patients gives
+weights whose performance varies more across patients than a few selected features do, but with one seed we cannot
+separate this from run-to-run variation.
+
+The shuffled-label control shows what a common mistake costs. Selecting features before the folds gave up to 0.58 AUC
+on labels with no signal, and inflated real results by up to 0.05, which is as large as the differences between feature
+sets that a study like this sets out to measure. The mistake would not produce a striking result by itself, which is why
+it is easy to miss without a control.
 
 \paragraph{Recommendations.} From this study we suggest the following for small-cohort glioma work:
 \begin{enumerate}
@@ -684,6 +959,10 @@ balanced accuracy by 0.29.
   \item Report CIs and paired tests, and do not rank models whose differences are not significant.
   \item Check that each model actually uses its inputs. Silent failures, such as feature tokens that are all zeros
         or a pretrained checkpoint that fails to load, are easy to miss in multi-stage pipelines.
+  \item Run a shuffled-label control through the whole pipeline. For late fusion it needs no GPU, and a leak in the
+        feature steps shows up at once.
+  \item Before interpreting a gap between validation and test, compare it with chance re-assignment of the patients
+        between the splits. It needs only the saved predictions.
 \end{enumerate}
 
 \paragraph{Limitations.}
@@ -691,7 +970,12 @@ balanced accuracy by 0.29.
   \item The data come from a single centre and use T2 only. Enhancement and necrosis are better seen on
         post-contrast T1, which likely explains part of the missed glioblastomas.
   \item The balanced cohort does not reflect clinical prevalence.
-  \item End-to-end and segmentation results are from one seed \todo{update}.
+  \item End-to-end and segmentation results are from one seed, so run-to-run variation is not measured. The gap test
+        holds each model's predictions fixed and says nothing about it either.
+  \item The gap test and the shuffled-label control were added after the results were known, and the Holm families of
+        the gap test follow this study's other comparisons rather than a prior plan. Both are exploratory. Each shuffled
+        run is one 5-fold pass, noisier than the 50 folds of the real labels.
+  \item The subgroup results are descriptive, one 5-fold pass per model, and several subgroups are small.
   \item The shared backbone was chosen after the segmentation benchmark and saw the classification training and
         validation images. It gives near-perfect masks on its own training patients but not on new ones, so
         classifier training crops and radiomics are cleaner for training than for test patients.
@@ -709,9 +993,14 @@ In a leakage-controlled benchmark on T2-weighted MRI:
   \item a convolutional segmenter was at least as good as state-space and transformer models, and self-supervised
         pretraining did not help;
   \item near-perfect diagnosis accuracy was reachable only with molecular inputs that define the label;
-  \item the imaging signal for grade and diagnosis was captured by hand-crafted radiomics, and deep features added
-        nothing beyond it;
-  \item a single 25-patient split was too variable to rank models.
+  \item the imaging signal for diagnosis was reachable through either hand-crafted radiomics or deep features, and deep
+        features added nothing once radiomics were present;
+  \item for grade, diagnosis and LGG versus HGG, imaging stayed above age and sex inside age bands, while for IDH status
+        it added nothing significant to clinical variables and was level with age inside age bands;
+  \item on shuffled labels the pipeline scored chance, and feature selection before the folds would have inflated
+        results by as much as the differences between feature sets;
+  \item chance re-assignment between two 25-patient splits moved macro AUC by about $\pm 0.2$, so a single such split is
+        too variable to rank models.
 \end{itemize}
 We release the resumable pipeline so that these checks can be applied to other small-cohort studies.
 

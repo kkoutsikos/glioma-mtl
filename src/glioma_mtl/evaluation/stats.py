@@ -9,7 +9,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm, wilcoxon
+from scipy.stats import norm, rankdata, wilcoxon
 from scipy.stats import t as student_t
 
 
@@ -150,3 +150,60 @@ def paired_bootstrap_test(y: Sequence[int], score_a: np.ndarray, score_b: np.nda
     p = float(min(1.0, max(2 * tail, 1 / len(stats))))
     return {"mean_diff": diff, "ci_low": float(low), "ci_high": float(high), "p_value": p, "n": len(y),
             "n_boot": len(stats)}
+
+
+def rank_macro_auc(y: Sequence[int], prob: np.ndarray) -> float:
+    """One-vs-rest macro AUC over the classes present in ``y``, from ranks: the same value as ``macro_auc`` when every
+    class is present, and fast enough to repeat thousands of times. ``prob`` has one column per class index."""
+    y, prob = np.asarray(y), np.asarray(prob)
+    present = np.unique(y)
+    if len(present) < 2:
+        raise ValueError("AUC needs at least two classes")
+    aucs = []
+    for k in present:
+        positive = y == k
+        n_pos = positive.sum()
+        aucs.append((rankdata(prob[:, k])[positive].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * (len(y) - n_pos)))
+    return float(np.mean(aucs))
+
+
+def stratified_partitions(y: Sequence[int], in_first: Sequence[bool], n_perm: int = 10000, seed: int = 0) -> np.ndarray:
+    """Boolean ``[n_perm, n_patients]``: random re-assignments of the patients to the first of two groups. Every
+    class keeps the number of patients it has in the first group, so class mix cannot explain a difference."""
+    y, in_first = np.asarray(y), np.asarray(in_first, dtype=bool)
+    rng = np.random.default_rng(seed)
+    masks = np.zeros((n_perm, len(y)), dtype=bool)
+    for k in np.unique(y):
+        members = np.flatnonzero(y == k)
+        n_first = int(in_first[members].sum())
+        for i in range(n_perm):
+            masks[i, rng.permutation(members)[:n_first]] = True
+    return masks
+
+
+def split_gap_null(y: Sequence[int], prob: np.ndarray, partitions: np.ndarray) -> np.ndarray:
+    """AUC(second group) - AUC(first group) of one model under each partition; its predictions stay fixed.
+
+    Each one-vs-rest AUC is the share of positive-negative pairs ranked correctly (ties count half), so all the
+    partitions can be scored at once from one table of pairwise comparisons.
+    """
+    y, prob = np.asarray(y), np.asarray(prob)
+
+    def macro_auc_per_partition(groups: np.ndarray) -> np.ndarray:
+        aucs = []
+        for k in np.unique(y):
+            positive = y == k
+            pos, neg = prob[positive, k][:, None], prob[~positive, k][None, :]
+            wins = (pos > neg) + 0.5 * (pos == neg)
+            in_pos, in_neg = groups[:, positive], groups[:, ~positive]
+            aucs.append(((in_pos @ wins) * in_neg).sum(1) / (in_pos.sum(1) * in_neg.sum(1)))
+        return np.mean(aucs, axis=0)
+
+    return macro_auc_per_partition((~partitions).astype(float)) - macro_auc_per_partition(partitions.astype(float))
+
+
+def permutation_p(observed: float, null: Sequence[float]) -> float:
+    """Two-sided permutation p-value: the share of ``null`` at least as far from zero as ``observed``, counting the
+    observed split itself, so it is never zero (Phipson & Smyth 2010)."""
+    null = np.asarray(null, dtype=float)
+    return float((1 + (np.abs(null) >= abs(observed) - 1e-12).sum()) / (1 + len(null)))

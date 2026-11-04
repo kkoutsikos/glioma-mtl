@@ -11,6 +11,7 @@ from sklearn.feature_selection import VarianceThreshold
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
+from glioma_mtl.data.metadata import normalize_patient_id
 from glioma_mtl.engine import predict, score, train_classifier, train_segmentation
 from glioma_mtl.engine.classification import FLIPS
 from glioma_mtl.engine.common import AmpStepper, BestTracker, make_optimizer, make_scheduler, save_last, try_resume
@@ -480,6 +481,211 @@ def test_kfold_saves_every_fold_score_on_folds_shared_by_all_feature_sets(tmp_pa
     sizes = curves.groupby("fraction")["n_train"].mean()
     assert sizes[0.5] < sizes[1.0] == len(meta) / 2                  # 2 folds: half the cohort trains
     assert curves.groupby(["fraction", "fold"])["n_train"].nunique().eq(1).all()   # same subsample for every set
+
+
+def _kfold_with_splits(tmp_path, metadata_csv, n_noise: int = 150):
+    """kfold_cv.py on the synthetic metadata with a split file and pure-noise 'radiomics' and 'deep' features."""
+    meta = pd.read_csv(metadata_csv)
+    ids = [normalize_patient_id(p) for p in meta["ID"]]
+    rng = np.random.default_rng(0)
+    parts = {"train": ids[:80], "val": ids[80:100], "test": ids[100:]}
+    (tmp_path / "split.json").write_text(json.dumps({"classification": parts, "segmentation": parts,
+                                                     "ssl": {"train": ids[:80], "val": ids[80:100]}}))
+    rad = pd.DataFrame(rng.normal(size=(len(ids), n_noise)), columns=[f"original_glcm_F{i}" for i in range(n_noise)])
+    rad.insert(0, "patient_id", ids)
+    rad.to_csv(tmp_path / "rad.csv", index=False)
+    deep = pd.DataFrame(rng.normal(size=(len(ids), n_noise)), columns=[f"deep_{i}" for i in range(n_noise)])
+    deep.insert(0, "patient_id", ids)
+    deep.to_csv(tmp_path / "deep.csv", index=False)
+    return [f"data.metadata_csv={metadata_csv.as_posix()}", f"data.splits_file={(tmp_path / 'split.json').as_posix()}",
+            f"radiomics.csv={(tmp_path / 'rad.csv').as_posix()}", f"deep_features.csv={(tmp_path / 'deep.csv').as_posix()}",
+            "radiomics.select=anova", "radiomics.k=5", "deep_features.k=5", "cv.folds=3", "cv.repeats=1"]
+
+
+def test_split_gap_mode_fits_on_training_patients_and_predicts_validation_and_test(tmp_path, metadata_csv, monkeypatch):
+    kfold = _load_script("kfold_cv")
+    overrides = _kfold_with_splits(tmp_path, metadata_csv)
+    out = tmp_path / "gap"
+    monkeypatch.setattr(sys, "argv", ["kfold_cv.py", "--config", str(SCRIPTS.parent / "configs" / "kfold_cv.yaml"),
+                                      "--split-gap", "--out-dir", str(out), "--set", *overrides, "tasks=[diagnosis, lgg_hgg]",
+                                      "split_gap.models=[logreg]", "split_gap.feature_sets=[age+sex, radiomics]"])
+    kfold.main()
+    pred = pd.read_csv(out / "split_gap_predictions.csv")
+    assert set(pred["split"]) == {"val", "test"} and set(pred["features"]) == {"age+sex", "radiomics"}
+    train = set(json.loads((tmp_path / "split.json").read_text())["classification"]["train"])
+    assert not train & set(pred["patient_id"])                       # nobody it was fit on gets a prediction
+    counts = pred.groupby(["task", "features", "model", "split"]).size()
+    assert (counts.xs("val", level="split") == 20).all() and (counts.xs("test", level="split") == 20).all()
+    diagnosis = pred[pred["task"] == "diagnosis"]
+    assert np.allclose(diagnosis[["p_0", "p_1", "p_2", "p_3"]].sum(1), 1.0)
+
+
+def test_negative_control_is_at_chance_inside_the_folds_and_inflated_before_them(tmp_path, metadata_csv, monkeypatch):
+    kfold = _load_script("kfold_cv")
+    overrides = _kfold_with_splits(tmp_path, metadata_csv)
+    out = tmp_path / "control"
+    monkeypatch.setattr(sys, "argv", ["kfold_cv.py", "--config", str(SCRIPTS.parent / "configs" / "kfold_cv.yaml"),
+                                      "--negative-control", "--out-dir", str(out), "--set", *overrides, "tasks=[idh]",
+                                      "negative_control.permutations=12", "negative_control.models=[logreg]", "negative_control.tasks=[idh]",
+                                      "negative_control.feature_sets=[image]"])
+    kfold.main()
+    df = pd.read_csv(out / "negative_control.csv")
+    assert set(df["labels"]) == {"real", "shuffled"} and df["macro_auc"].notna().all()
+    shuffled = df[df["labels"] == "shuffled"].pivot(index="permutation", columns="selection", values="macro_auc")
+    assert len(shuffled) == 12
+    assert abs(shuffled["inside"].mean() - 0.5) < 0.08               # nothing to find, nothing found
+    assert shuffled["before"].mean() > shuffled["inside"].mean() + 0.1   # the same noise, selected on all patients
+
+    agg = _load_script("aggregate_results")
+    (tmp_path / "negative_control").mkdir()
+    df.to_csv(tmp_path / "negative_control" / "negative_control.csv", index=False)
+    row = agg.negative_control_table(tmp_path).iloc[0]
+    assert row["permutations"] == 12 and float(row["inflation_shuffled"]) > 0.1 and 1 / 13 <= float(row["p_real"]) <= 1
+
+    # After a crash: a half-written run is dropped, finished ones are kept, and the rerun gives the same table.
+    path = out / "negative_control.csv"
+    partial = df.iloc[:-5].copy()                                    # 2 rows per run: the last run loses one of its rows
+    partial.to_csv(path, index=False)
+    finished = kfold.finished_control_runs(path, 2)
+    assert ("idh", "image", "shuffled", 8) in finished and ("idh", "image", "shuffled", 9) not in finished
+    assert 9 not in set(pd.read_csv(path)["permutation"])            # the half-written run's row is gone from the file
+    kfold.main()
+    resumed = pd.read_csv(path)
+    key = ["task", "features", "labels", "permutation", "selection"]
+    merged = df.merge(resumed, on=key + ["model"], suffixes=("", "_resumed"))
+    assert len(resumed) == len(df) == len(merged) and np.allclose(merged["macro_auc"], merged["macro_auc_resumed"])
+
+
+def test_real_labels_of_the_control_reproduce_the_main_cv(tmp_path, metadata_csv, monkeypatch):
+    """Same folds, same model: the control's 'inside' score on the real labels is the main table's number."""
+    kfold = _load_script("kfold_cv")
+    overrides = _kfold_with_splits(tmp_path, metadata_csv)
+    config = str(SCRIPTS.parent / "configs" / "kfold_cv.yaml")
+    common = [*overrides, "tasks=[idh]", "cv.models=[logreg]", "cv.feature_sets=[image]"]
+    monkeypatch.setattr(sys, "argv", ["kfold_cv.py", "--config", config, "--out-dir", str(tmp_path / "cv"), "--set", *common])
+    kfold.main()
+    monkeypatch.setattr(sys, "argv", ["kfold_cv.py", "--config", config, "--negative-control", "--out-dir",
+                                      str(tmp_path / "control"), "--set", *common, "negative_control.permutations=1", "negative_control.tasks=[idh]",
+                                      "negative_control.models=[logreg]", "negative_control.feature_sets=[image]"])
+    kfold.main()
+    cv = pd.read_csv(tmp_path / "cv" / "cv_results.csv")
+    expected = cv[(cv["features"] == "image") & (cv["metric"] == "macro_auc")]["mean"].iloc[0]
+    control = pd.read_csv(tmp_path / "control" / "negative_control.csv")
+    real = control[(control["labels"] == "real") & (control["selection"] == "inside")]["macro_auc"].iloc[0]
+    assert np.isclose(real, expected)
+
+
+def test_split_gap_tables_compare_end_to_end_with_late_fusion_under_the_same_partitions(tmp_path):
+    agg = _load_script("aggregate_results")
+    rng = np.random.default_rng(0)
+    y_val, y_test = np.tile([0, 1], 15), np.tile([0, 1], 15)
+    ids_val, ids_test = [f"V{i}" for i in range(30)], [f"T{i}" for i in range(30)]
+    signal = lambda y, s: np.clip(0.5 + s * (y - 0.5) + rng.normal(0, 0.1, len(y)), 0.01, 0.99)    # noqa: E731
+
+    def write(run, score_val, score_test):
+        run.mkdir(parents=True, exist_ok=True)
+        for ids, y, score, name in ((ids_val, y_val, score_val, "val_predictions_best.csv"),
+                                    (ids_test, y_test, score_test, "predictions_test.csv")):
+            pd.DataFrame({"patient_id": ids, "y_diagnosis": y, "p_diagnosis_0": 1 - score,
+                          "p_diagnosis_1": score}).to_csv(run / name, index=False)
+
+    write(tmp_path / "cls_image_only_s42", rng.uniform(0.01, 0.99, 30), signal(y_test, 0.8))     # a gap
+    plan = {"classification": {"seeds": [42], "experiments": {"cls_image_only": {}}}}
+    (tmp_path / "split_gap").mkdir()
+    rows = []
+    for split, ids, y, score in (("val", ids_val, y_val, signal(y_val, 0.8)), ("test", ids_test, y_test, signal(y_test, 0.8))):
+        rows += [{"task": "diagnosis", "features": "image", "model": "xgboost", "split": split, "patient_id": p, "y": v,
+                  "p_0": 1 - s, "p_1": s, "p_2": 0.0, "p_3": 0.0} for p, v, s in zip(ids, y, score)]
+    pd.DataFrame(rows).to_csv(tmp_path / "split_gap" / "split_gap_predictions.csv", index=False)
+
+    table, pairs = agg.split_gap_tables(plan, tmp_path, n_perm=500)
+    by_family = table.set_index("family")
+    assert float(by_family.loc["end-to-end", "p"]) < 0.05 and float(by_family.loc["end-to-end", "gap"]) > 0.3
+    assert float(by_family.loc["late fusion xgboost", "p"]) > 0.05
+    assert list(by_family["n_val"]) == [30, 30] and list(by_family["n_test"]) == [30, 30]
+    assert len(pairs) == 1 and pairs.iloc[0]["late_fusion"] == "image" and float(pairs.iloc[0]["p"]) < 0.05
+
+
+def test_validation_recheck_reports_any_difference_between_the_two_code_paths(tmp_path):
+    agg = _load_script("aggregate_results")
+    run = tmp_path / "cls_image_only_s42"
+    run.mkdir()
+    y = np.array([0, 1, 2, 3] * 3)
+    prob = np.random.default_rng(0).dirichlet(np.ones(4), 12)
+    frame = pd.DataFrame({"patient_id": [f"P{i}" for i in range(12)], "y_diagnosis": y,
+                          **{f"p_diagnosis_{k}": prob[:, k] for k in range(4)}})
+    frame.to_csv(run / "val_predictions_best.csv", index=False)
+    plan = {"classification": {"seeds": [42], "experiments": {"cls_image_only": {}}}}
+    assert agg.validation_recheck(plan, tmp_path) is None            # nothing rerun yet
+    frame.sample(frac=1, random_state=0).to_csv(run / "predictions_val.csv", index=False)     # another order, same values
+    same = agg.validation_recheck(plan, tmp_path).iloc[0]
+    assert float(same["max_abs_diff"]) == 0 and same["diagnosis_auc_saved"] == same["diagnosis_auc_recomputed"]
+    assert same["n"] == 12
+    frame.assign(p_diagnosis_0=lambda d: d["p_diagnosis_0"] + 0.1).to_csv(run / "predictions_val.csv", index=False)
+    assert np.isclose(float(agg.validation_recheck(plan, tmp_path).iloc[0]["max_abs_diff"]), 0.1)
+
+
+def test_subgroup_table_reports_sex_and_age_bands_and_skips_thin_classes(tmp_path):
+    agg = _load_script("aggregate_results")
+    (tmp_path / "kfold_cv").mkdir()
+    rng = np.random.default_rng(0)
+    n = 90
+    y = np.tile([0, 1], n // 2)
+    age = np.r_[np.full(30, 30), np.full(30, 50), np.full(30, 70)]
+    y[60:] = 1                                                       # nearly no class 0 in the oldest band
+    y[60:63] = 0
+    score = np.clip(0.5 + 0.5 * (y - 0.5) + rng.normal(0, 0.1, n), 0.01, 0.99)
+    frame = pd.DataFrame({"task": "lgg_hgg", "features": "radiomics", "model": "xgboost", "patient_id": range(n), "y": y,
+                          "age": age, "sex": np.tile(["F", "M"], n // 2), "p_0": 1 - score, "p_1": score})
+    frame.to_csv(tmp_path / "kfold_cv" / "oof_predictions.csv", index=False)
+    table = agg.subgroup_table(tmp_path).set_index("subgroup")
+    assert list(table.index) == ["all", "female", "male", "age under 40", "age 40-59", "age 60 and over"]
+    assert list(table["n"]) == [90, 45, 45, 30, 30, 30]
+    assert float(table.at["all", "macro_auc"].split()[0]) > 0.9 and "[" in table.at["all", "macro_auc"]
+    assert table.at["age 60 and over", "macro_auc"] == "–" and table.at["age 60 and over", "smallest_class"] == 3
+    frame.drop(columns="age").to_csv(tmp_path / "kfold_cv" / "oof_predictions.csv", index=False)
+    assert agg.subgroup_table(tmp_path) is None                      # predictions from before the subgroup columns
+
+
+def test_subgroup_table_covers_both_models_and_scores_age_itself_on_binary_tasks(tmp_path):
+    agg = _load_script("aggregate_results")
+    (tmp_path / "kfold_cv").mkdir()
+    n = 60
+    age = np.linspace(20, 79, n)
+    y = (age > 50).astype(int)                                       # age separates the classes perfectly overall
+    frames = []
+    for model in ("xgboost", "logreg", "mlp"):
+        for task, features in (("lgg_hgg", "age+sex"), ("idh", "image")):
+            frames.append(pd.DataFrame({"task": task, "features": features, "model": model, "patient_id": range(n), "y": y,
+                                        "age": age, "sex": np.tile(["F", "M"], n // 2), "p_0": 0.5, "p_1": 0.5}))
+    frames.append(pd.DataFrame({"task": "grade", "features": "age+sex", "model": "xgboost", "patient_id": range(n),
+                                "y": np.tile([0, 1, 2], n // 3), "age": age, "sex": "F", "p_0": 0.2, "p_1": 0.3, "p_2": 0.5}))
+    pd.concat(frames).to_csv(tmp_path / "kfold_cv" / "oof_predictions.csv", index=False)
+    table = agg.subgroup_table(tmp_path)
+    assert set(table["model"]) == {"xgboost", "logreg", "-"}         # the MLP is not asked for
+    itself = table[table["features"] == "age itself"].set_index("subgroup")
+    assert set(table[table["features"] == "age itself"]["task"]) == {"lgg_hgg"}   # needs age+sex rows; binary tasks only
+    assert list(itself["n"]) == [60, 30, 30, 20, 20, 20]             # one row per patient, not one per model
+    assert itself.at["all", "macro_auc"].startswith("1.000")         # older = the second class
+
+
+def test_validation_rerun_and_post_hoc_steps_retrain_nothing(tmp_path):
+    import yaml
+
+    runner = _load_script("run_paper")
+    plan = yaml.safe_load((runner.REPO / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    steps = {s.id: s for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]}
+    rerun, test = steps["cls_eval_val:cls_image_only_s42"], steps["cls_eval:cls_image_only_s42"]
+    assert rerun.stage == "cls" and rerun.optional and rerun.run_dir is None and rerun.version == test.version
+    assert rerun.args[rerun.args.index("--split") + 1] == "val"
+    assert "predict:val" in rerun.needs and "predict:test" not in rerun.needs
+    for key, flag, folder in (("split_gap", "--split-gap", "split_gap"), ("negative_control", "--negative-control", "negative_control")):
+        step = steps[key]
+        assert step.stage == "kfold" and step.optional and flag in step.args and step.needs == steps["kfold"].needs
+        assert step.args[step.args.index("--out-dir") + 1].endswith(folder)
+        plan["kfold"][key] = False
+    remaining = {s.id for s in runner.build_steps(plan, [f"output_root={tmp_path.as_posix()}"])[0]}
+    assert not {"split_gap", "negative_control"} & remaining
 
 
 def _write_predictions(path: Path, y: np.ndarray, prob: np.ndarray, task: str = "diagnosis") -> None:

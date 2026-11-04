@@ -12,6 +12,8 @@
 * Tests of the pre-specified comparisons (``CLS_COMPARISONS``, ``KFOLD_COMPARISONS``): DeLong or a paired
   bootstrap on the test patients, Nadeau–Bengio's corrected resampled t-test over the CV folds.
 * Ground-truth-mask sensitivity analysis (the ``oracle`` stage of run_paper.py), against predicted masks.
+* Post hoc checks: the validation-test gap against chance re-assignment of the patients, the validation predictions
+  rerun through the test code path, the shuffled-label control, and late fusion by sex and age band.
 """
 from __future__ import annotations
 
@@ -26,11 +28,12 @@ import yaml
 from sklearn.metrics import balanced_accuracy_score
 
 from glioma_mtl.data.metadata import TASKS
-from glioma_mtl.engine import task_arrays, task_calls
+from glioma_mtl.engine import add_derived_lgg_hgg, task_arrays, task_calls
 from glioma_mtl.engine.common import count_parameters
 from glioma_mtl.evaluation import (bootstrap_ci, brier_score, classification_metrics, concordance_correlation,
                                    corrected_resampled_ttest, delong_test, expected_calibration_error, icc_agreement,
-                                   macro_auc, paired_bootstrap_test, paired_wilcoxon)
+                                   macro_auc, paired_bootstrap_test, paired_wilcoxon, permutation_p, rank_macro_auc,
+                                   split_gap_null, stratified_partitions)
 from glioma_mtl.models.segmentation import build_segmentation_model
 from glioma_mtl.utils import read_history
 
@@ -55,6 +58,15 @@ KFOLD_COMPARISONS = [
     ("radiomics", "image", "radiomics vs deep features"),
 ]
 KFOLD_TEST_MODELS = ["xgboost", "logreg"]
+# Validation-test gap test: random re-assignments of the patients, and each end-to-end model of the main ladder with the
+# late-fusion feature set that has the same inputs.
+SPLIT_GAP_PERMUTATIONS = 10000
+SPLIT_GAP_PAIRS = [("cls_image_only", "image"), ("cls_image_clinical", "image+clinical"),
+                   ("cls_image_clinical_radiomics", "image+clinical+radiomics")]
+# Subgroup table: feature sets, age bands (name, from, up to but not including) and the smallest class that gets an AUC.
+SUBGROUP_FEATURES = ["age+sex", "radiomics", "image", "clinical+radiomics", "image+clinical+radiomics"]
+AGE_BANDS = [("age under 40", 0, 40), ("age 40-59", 40, 60), ("age 60 and over", 60, 200)]
+SUBGROUP_MIN_CLASS = 5
 
 
 def holm(pvalues: list[float]) -> list[float]:
@@ -492,6 +504,186 @@ def radiomics_stability(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, str] | 
     return per_feature, summary, patients
 
 
+def validation_predictions(root: Path, exp: str, seeds) -> pd.DataFrame | None:
+    """Validation predictions averaged over seeds: the ones redone through the test code path where they exist
+    (``predictions_val.csv``), otherwise those saved at the selected epoch during training."""
+    frames = []
+    for seed in seeds:
+        run = root / f"{exp}_s{seed}"
+        path = next((p for p in (run / "predictions_val.csv", run / "val_predictions_best.csv") if p.exists()), None)
+        if path is not None:
+            frames.append(pd.read_csv(path))
+    return add_derived_lgg_hgg(pd.concat(frames).groupby("patient_id").mean(numeric_only=True).reset_index()) if frames else None
+
+
+def _split_gap_entries(plan: dict, root: Path) -> list[dict]:
+    """One entry per model and task: labels, probabilities and split membership of the validation and test patients."""
+    cls, entries = plan.get("classification") or {}, []
+    for exp, spec in (cls.get("experiments") or {}).items():
+        seeds = experiment_seeds(cls, spec)
+        val, test = validation_predictions(root, exp, seeds), ensemble_predictions(root, exp, seeds)
+        if val is None or test is None:
+            continue
+        for task in _tasks(val, test):
+            parts = [task_arrays(d, task) for d in (val, test)]
+            keep = [y >= 0 for y, _ in parts]
+            ids = [d["patient_id"].to_numpy()[k] for d, k in zip((val, test), keep)]
+            entries.append({"family": "end-to-end", "model": exp + (" (leaky reference)" if spec.get("reference") else ""),
+                            "exp": exp, "task": task, "ids": np.r_[ids[0], ids[1]],
+                            "y": np.r_[parts[0][0][keep[0]], parts[1][0][keep[1]]].astype(int),
+                            "prob": np.r_[parts[0][1][keep[0]], parts[1][1][keep[1]]],
+                            "in_val": np.r_[np.ones(len(ids[0]), bool), np.zeros(len(ids[1]), bool)]})
+    path = root / "split_gap" / "split_gap_predictions.csv"
+    if path.exists():
+        for (task, features, model), g in pd.read_csv(path).groupby(["task", "features", "model"], sort=False):
+            prob = g[[f"p_{k}" for k in range(len(TASKS[task][1]))]].to_numpy()
+            entries.append({"family": f"late fusion {model}", "model": features, "exp": features, "task": task,
+                            "ids": g["patient_id"].to_numpy(), "y": g["y"].to_numpy(int), "prob": prob,
+                            "in_val": (g["split"] == "val").to_numpy()})
+    return entries
+
+
+def split_gap_tables(plan: dict, root: Path, n_perm: int = SPLIT_GAP_PERMUTATIONS) -> tuple[pd.DataFrame, pd.DataFrame | None] | None:
+    """Is a model's validation-test AUC gap larger than chance assignment of the same patients to the two splits?
+
+    Each model's per-patient probabilities stay fixed; the patients are re-assigned at random, within each class, so
+    the two splits keep their sizes and class mix. The same re-assignments serve every model of a task, so that
+    the gaps of two models can also be compared (``SPLIT_GAP_PAIRS``). Holm within each task and family of models.
+    """
+    entries = _split_gap_entries(plan, root)
+    if not entries:
+        return None
+    rows, pairs = [], []
+    for task in dict.fromkeys(e["task"] for e in entries):
+        group = [e for e in entries if e["task"] == task]
+        ref = group[0]
+        order = {p: i for i, p in enumerate(ref["ids"])}
+        partitions = stratified_partitions(ref["y"], ref["in_val"], n_perm)
+        gaps = {}
+        for e in group:
+            if set(e["ids"]) != set(order):
+                print(f"[split gap] {e['family']} {e['model']} {task}: other patients than {ref['model']}, skipped")
+                continue
+            idx = np.argsort([order[p] for p in e["ids"]])          # into the reference patient order
+            y, prob, in_val = e["y"][idx], e["prob"][idx], e["in_val"][idx]
+            if not ((y == ref["y"]).all() and (in_val == ref["in_val"]).all()):
+                raise ValueError(f"{e['model']} {task}: labels or splits differ from {ref['model']}")
+            auc_val, auc_test = rank_macro_auc(y[in_val], prob[in_val]), rank_macro_auc(y[~in_val], prob[~in_val])
+            null = split_gap_null(y, prob, partitions)
+            gaps[e["family"], e["exp"]] = (auc_test - auc_val, null)
+            rows.append({"task": task, "family": e["family"], "model": e["model"], "n_val": int(in_val.sum()),
+                         "n_test": int((~in_val).sum()), "auc_val": auc_val, "auc_test": auc_test,
+                         "gap": auc_test - auc_val, "chance_low": np.quantile(null, 0.025),
+                         "chance_high": np.quantile(null, 0.975), "p_value": permutation_p(auc_test - auc_val, null)})
+        for exp, features in SPLIT_GAP_PAIRS:
+            a, b = gaps.get(("end-to-end", exp)), gaps.get(("late fusion xgboost", features))
+            if a is not None and b is not None:
+                pairs.append({"task": task, "end_to_end": exp, "late_fusion": features, "gap_end_to_end": a[0],
+                              "gap_late_fusion": b[0], "difference": a[0] - b[0],
+                              "p_value": permutation_p(a[0] - b[0], a[1] - b[1])})
+    df = _with_holm(pd.DataFrame(rows), ["task", "family"])
+    table = pd.DataFrame({
+        "task": df["task"], "family": df["family"], "model": df["model"], "n_val": df["n_val"], "n_test": df["n_test"],
+        "auc_val": df["auc_val"].map("{:.3f}".format), "auc_test": df["auc_test"].map("{:.3f}".format),
+        "gap": df["gap"].map("{:+.3f}".format),
+        "chance_95": [f"{a:+.3f} to {b:+.3f}" for a, b in zip(df["chance_low"], df["chance_high"])],
+        "p": df["p_value"].map("{:.2g}".format), "p_holm": df["p_holm"].map("{:.2g}".format)})
+    if not pairs:
+        return table, None
+    pf = _with_holm(pd.DataFrame(pairs), ["task"])
+    return table, pd.DataFrame({
+        "task": pf["task"], "end_to_end": pf["end_to_end"], "late_fusion": pf["late_fusion"],
+        "gap_end_to_end": pf["gap_end_to_end"].map("{:+.3f}".format), "gap_late_fusion": pf["gap_late_fusion"].map("{:+.3f}".format),
+        "difference": pf["difference"].map("{:+.3f}".format), "p": pf["p_value"].map("{:.2g}".format),
+        "p_holm": pf["p_holm"].map("{:.2g}".format)})
+
+
+def validation_recheck(plan: dict, root: Path) -> pd.DataFrame | None:
+    """The validation predictions saved at the selected epoch during training, against the same checkpoint run through
+    the test patients' code path. They read their crops from different places (disk cache, none), so this shows that
+    the validation and test numbers come from the same processing."""
+    cls, rows = plan.get("classification") or {}, []
+    for exp, spec in (cls.get("experiments") or {}).items():
+        for seed in experiment_seeds(cls, spec):
+            run = root / f"{exp}_s{seed}"
+            saved, fresh = run / "val_predictions_best.csv", run / "predictions_val.csv"
+            if not (saved.exists() and fresh.exists()):
+                continue
+            a, b = (pd.read_csv(p).set_index("patient_id") for p in (saved, fresh))
+            ids, cols = a.index.intersection(b.index), [c for c in a.columns if c.startswith("p_") and c in b.columns]
+            diff = (a.loc[ids, cols] - b.loc[ids, cols]).abs().to_numpy()
+            y, pa = task_arrays(a.loc[ids].reset_index(), "diagnosis")
+            pb = task_arrays(b.loc[ids].reset_index(), "diagnosis")[1]
+            rows.append({"run": run.name, "n": len(ids), "n_saved": len(a), "n_recomputed": len(b),
+                         "max_abs_diff": f"{diff.max():.2g}", "mean_abs_diff": f"{diff.mean():.2g}",
+                         "diagnosis_auc_saved": f"{macro_auc(y, pa):.3f}", "diagnosis_auc_recomputed": f"{macro_auc(y, pb):.3f}"})
+    return pd.DataFrame(rows) if rows else None
+
+
+def negative_control_table(root: Path) -> pd.DataFrame | None:
+    """Shuffled-label control: AUC must be 0.5 unless information leaks. ``p_real`` is the share of the shuffled runs
+    (feature steps inside the folds) reaching the real labels' AUC, counting the real run itself."""
+    path = root / "negative_control" / "negative_control.csv"
+    if not path.exists():
+        return None
+    rows = []
+    for (task, features, model), g in pd.read_csv(path).groupby(["task", "features", "model"], sort=False):
+        shuffled = g[g["labels"] == "shuffled"].pivot(index="permutation", columns="selection", values="macro_auc")
+        real = g[g["labels"] == "real"].set_index("selection")["macro_auc"]
+        rows.append({"task": task, "features": features, "model": model, "permutations": len(shuffled),
+                     "shuffled_inside": fmt(shuffled["inside"].mean(), shuffled["inside"].std()),
+                     "shuffled_before": fmt(shuffled["before"].mean(), shuffled["before"].std()),
+                     "inflation_shuffled": f"{(shuffled['before'] - shuffled['inside']).mean():+.3f}",
+                     "real_inside": f"{real['inside']:.3f}", "real_before": f"{real['before']:.3f}",
+                     "p_real": f"{(1 + (shuffled['inside'] >= real['inside']).sum()) / (1 + len(shuffled)):.2g}"})
+    return pd.DataFrame(rows)
+
+
+def _subgroup_rows(g: pd.DataFrame, prob: np.ndarray, task: str, features: str, model: str) -> list[dict]:
+    y, classes = g["y"].to_numpy(int), np.unique(g["y"])
+    groups = {"all": np.ones(len(g), bool), "female": (g["sex"] == "F").to_numpy(), "male": (g["sex"] == "M").to_numpy(),
+              **{name: g["age"].between(low, high, inclusive="left").to_numpy() for name, low, high in AGE_BANDS}}
+    rows = []
+    for name, mask in groups.items():
+        smallest = int(min((y[mask] == k).sum() for k in classes))
+        row = {"task": task, "features": features, "model": model, "subgroup": name, "n": int(mask.sum()),
+               "smallest_class": smallest, "macro_auc": "–"}
+        if smallest >= SUBGROUP_MIN_CLASS:
+            auc, low, high = bootstrap_ci(y_true=y[mask], y_score=prob[mask], metric=rank_macro_auc)
+            row["macro_auc"] = fmt(auc, lo=low, hi=high)
+        rows.append(row)
+    return rows
+
+
+def subgroup_table(root: Path, models: tuple[str, ...] = ("xgboost", "logreg")) -> pd.DataFrame | None:
+    """Late-fusion macro AUC by sex and age band, from the out-of-fold predictions, with a bootstrap CI over patients.
+
+    No AUC where a class has fewer than ``SUBGROUP_MIN_CLASS`` patients in the subgroup. Age varies less within a band,
+    so the bands show what the imaging contributes when age has less to offer. Age still carries some signal there:
+    for the binary tasks, the row ``age itself`` scores patients by age directly, with no model. It is the reference
+    for the age + sex models, because a flexible model on one near-discrete feature with almost no signal can score
+    far below chance on held-out patients.
+    """
+    path = root / "kfold_cv" / "oof_predictions.csv"
+    if not path.exists():
+        return None
+    oof = pd.read_csv(path)
+    if "age" not in oof:
+        return None
+    rows = []
+    for model in models:
+        wanted = oof[(oof["model"] == model) & oof["features"].isin(SUBGROUP_FEATURES)]
+        for (task, features), g in wanted.groupby(["task", "features"], sort=False):
+            prob = g[[f"p_{k}" for k in range(len(TASKS[task][1]))]].to_numpy()
+            rows += _subgroup_rows(g, prob, task, features, model)
+    for task, g in oof[oof["model"].isin(models) & (oof["features"] == "age+sex")].groupby("task", sort=False):
+        if len(TASKS[task][1]) == 2:
+            g = g.drop_duplicates("patient_id")
+            score = g["age"].to_numpy(float) / 200                 # older = the second class, HGG or IDH-wildtype
+            rows += _subgroup_rows(g, np.column_stack([1 - score, score]), task, "age itself", "-")
+    return pd.DataFrame(rows) if rows else None
+
+
 def kfold_tables(root: Path) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     cv_path, ho_path = root / "kfold_cv" / "cv_results.csv", root / "kfold_cv" / "holdout_results.csv"
     cv = ho = None
@@ -579,6 +771,36 @@ def main() -> None:
         sections.append(save(stability[1], out, "radiomics_stability",
                              f"Radiomics agreement between predicted and expert masks on the {stability[2]} "
                              "(ICC(2,1), median [IQR] per feature class; good ≥ 0.75, excellent ≥ 0.9)"))
+    gap = split_gap_tables(plan, root)
+    if gap is not None:
+        sections.append(save(gap[0], out, "split_gap",
+                             "Validation-test gap (test − validation macro AUC) against chance: predictions fixed, "
+                             f"{SPLIT_GAP_PERMUTATIONS} random re-assignments of the same patients to the two splits "
+                             "within each class (chance_95: central 95% of those gaps; two-sided permutation p; Holm "
+                             "within each task and family of models). Post hoc."))
+        if gap[1] is not None:
+            sections.append(save(gap[1], out, "split_gap_pairs",
+                                 "Validation-test gap of each end-to-end model against late fusion with the same inputs "
+                                 "(XGBoost, fit on the same training patients), under the same re-assignments (Holm "
+                                 "within each task). Post hoc."))
+    recheck = validation_recheck(plan, root)
+    if recheck is not None:
+        sections.append(save(recheck, out, "validation_recheck",
+                             "Validation predictions saved during training against the same checkpoint rerun through "
+                             "the test code path"))
+    control = negative_control_table(root)
+    if control is not None:
+        sections.append(save(control, out, "negative_control",
+                             "Shuffled-label control, macro AUC: feature steps (imputer, scaler, selector) fit inside "
+                             "the folds against once on all patients before them (mean ± SD over permutations, one 5-fold "
+                             "pass each); the real labels on the main CV folds; p_real: share of shuffled runs reaching "
+                             "the real AUC, feature steps inside. Post hoc."))
+    subgroups = subgroup_table(root)
+    if subgroups is not None:
+        sections.append(save(subgroups, out, "subgroups",
+                             "Late fusion by sex and age band: macro AUC [95% bootstrap CI] on out-of-fold predictions; "
+                             f"none where a class has fewer than {SUBGROUP_MIN_CLASS} patients. 'age itself': patients "
+                             "scored by age, with no model"))
     (out / "summary.md").write_text("\n".join(sections), encoding="utf-8")
     print("\n".join(sections))
     print(f"Saved tables to {out}")

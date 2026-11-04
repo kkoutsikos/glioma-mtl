@@ -33,3 +33,15 @@ learning_curve:
   repeats: 4                                 # x cv.folds = 20 test folds
   models: [xgboost, logreg]
   feature_sets: [age+sex, radiomics, image, clinical+radiomics, image+clinical+radiomics]
+# scripts/kfold_cv.py --split-gap: fit on the classification training patients, predict validation and test, so that
+# late fusion can sit next to the end-to-end models in the validation-test gap test (scripts/aggregate_results.py).
+split_gap:
+  models: [xgboost, logreg]
+  feature_sets: [age+sex, radiomics, image, image+clinical, clinical+radiomics, image+clinical+radiomics]
+# scripts/kfold_cv.py --negative-control: shuffled labels must score AUC 0.5 unless information leaks. Feature steps
+# fit inside the folds (this study) against once before them (the common mistake); the real labels use the main folds.
+negative_control:
+  permutations: 100
+  tasks: [diagnosis, lgg_hgg, idh]
+  models: [xgboost, logreg]
+  feature_sets: [radiomics, image]           # 102 features -> RFE top 30; 1392 features -> ANOVA top 32

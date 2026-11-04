@@ -15,6 +15,12 @@ same for every feature set and model of a task, so scores can be compared fold b
 ``--learning-curve`` instead fits each pipeline on stratified fractions of every training fold and scores it on
 the full test fold (``learning_curve`` in the config), writing ``learning_curves.csv``: does any feature set
 keep improving with more patients?
+``--split-gap`` instead fits each pipeline on the classification training patients only and predicts the
+validation and test patients (``split_gap`` in the config), writing ``split_gap_predictions.csv``: the same split
+as the end-to-end models, for aggregate_results.py's validation-test gap test.
+``--negative-control`` instead reruns the pipelines on shuffled labels and on the real ones, with the feature steps
+fit inside the folds and, as the common mistake, once before them (``negative_control`` in the config), writing
+``negative_control.csv``.
 ``--holdout`` also fits each pipeline once on classification train+val and evaluates it on the
 classification test split, which no model in the pipeline has seen. Feature sets marked
 ``(leaky reference)`` use tissue- or surgery-derived variables; they are context, not a prediction model.
@@ -31,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from joblib import Memory
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
@@ -199,6 +206,71 @@ def learning_curve_rows(task: str, X_by_set: dict, y: np.ndarray, n_classes: int
     return rows
 
 
+def _scores(clf, X_train, y_train, X_test, y_test, n_classes: int, **fit_kw) -> float:
+    clf.fit(X_train, y_train, **fit_kw)
+    proba = np.zeros((X_test.shape[0], n_classes))
+    proba[:, clf.classes_] = clf.predict_proba(X_test)
+    return macro_auc(y_test, proba)
+
+
+def control_scores(X: pd.DataFrame, y: np.ndarray, splits: list, make_features, models: dict, n_classes: int) -> list[dict]:
+    """Mean macro AUC over ``splits`` of each model, with the feature steps (imputer, scaler, selector) fit two ways:
+
+    * ``inside``: on each training fold, as everywhere in this study;
+    * ``before``: once on all patients with these labels, and only the classifier refit per fold. This is the common
+      mistake: the test folds have already shaped which features the classifier gets.
+    """
+    all_weights = compute_sample_weight("balanced", y)
+    leaky = make_features().fit_transform(X, y)
+    totals = {(name, kind): [] for name in models for kind in ("inside", "before")}
+    for tr, te in splits:
+        features = make_features().fit(X.iloc[tr], y[tr])
+        clean = features.transform(X.iloc[tr]), features.transform(X.iloc[te])
+        for name, make_model in models.items():
+            kw = {"sample_weight": all_weights[tr]} if name == "xgboost" else {}
+            totals[name, "inside"].append(_scores(make_model(), clean[0], y[tr], clean[1], y[te], n_classes, **kw))
+            totals[name, "before"].append(_scores(make_model(), leaky[tr], y[tr], leaky[te], y[te], n_classes, **kw))
+    return [{"model": name, "selection": kind, "macro_auc": float(np.mean(v))} for (name, kind), v in totals.items()]
+
+
+def negative_control_rows(task: str, X_by_set: dict, y: np.ndarray, n_classes: int, models: dict, cfg: dict,
+                          make_features, save, done=frozenset()) -> None:
+    """Shuffled labels (nothing to find, so the AUC must be 0.5 if no information leaks) and the real labels, each
+    with the feature steps fit inside the folds and before them. The real labels use the folds of the main CV.
+
+    Every run depends only on its own seed, so a crashed job can skip what ``done`` lists: (task, features, labels,
+    permutation). ``save`` receives the rows of one finished run at a time.
+    """
+    nc, cv_cfg, seed = cfg.get("negative_control") or {}, cfg.get("cv") or {}, cfg.get("seed", 42)
+    folds = cv_cfg.get("folds", 5)
+    for fs_name, X in X_by_set.items():
+        def run(labels, perm, target, splits):
+            save([{"task": task, "features": fs_name, "labels": labels, "permutation": perm, **r}
+                  for r in control_scores(X, target, splits, lambda fs=fs_name: make_features(fs), models, n_classes)])
+
+        if (task, fs_name, "real", -1) not in done:
+            run("real", -1, y, list(RepeatedStratifiedKFold(n_splits=folds, n_repeats=cv_cfg.get("repeats", 10),
+                                                            random_state=seed).split(np.zeros(len(y)), y)))
+        for perm in range(nc.get("permutations", 100)):
+            if (task, fs_name, "shuffled", perm) in done:
+                continue
+            shuffled = np.random.default_rng([seed, perm]).permutation(y)
+            run("shuffled", perm, shuffled, list(StratifiedKFold(n_splits=folds, shuffle=True, random_state=perm)
+                                                 .split(np.zeros(len(y)), shuffled)))
+
+
+def finished_control_runs(path: Path, n_rows_per_run: int) -> set:
+    """Runs already complete in a partly written ``negative_control.csv``; rows of an interrupted run are removed."""
+    if not path.exists():
+        return set()
+    old = pd.read_csv(path)
+    keys = ["task", "features", "labels", "permutation"]
+    complete = old[old["macro_auc"].notna()].groupby(keys).filter(lambda g: len(g) == n_rows_per_run)
+    if len(complete) != len(old):
+        complete.to_csv(path, index=False)
+    return set(complete[keys].itertuples(index=False, name=None))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True)
@@ -206,6 +278,11 @@ def main() -> None:
     parser.add_argument("--holdout", action="store_true", help="also fit on train+val and score the test split")
     parser.add_argument("--learning-curve", action="store_true",
                         help="only the learning curves (config: learning_curve), written to learning_curves.csv")
+    parser.add_argument("--split-gap", action="store_true",
+                        help="only fit on classification train and predict validation and test (config: split_gap), "
+                             "written to split_gap_predictions.csv")
+    parser.add_argument("--negative-control", action="store_true",
+                        help="only the shuffled-label control (config: negative_control), written to negative_control.csv")
     parser.add_argument("--out-dir", default=None, help="default: <output_root>/kfold_cv")
     args = parser.parse_args()
     cfg = load_config(args.config, args.set)
@@ -242,6 +319,72 @@ def main() -> None:
                                  random_state=cfg.get("seed", 42))
     out_dir = Path(args.out_dir or Path(cfg.get("output_root", "runs")) / "kfold_cv")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    def set_blocks(fs_name):
+        groups, use_rad, use_deep = sets[fs_name]
+        numeric, categorical = feature_columns(groups)
+        rad, deep = (blocks["rad"] if use_rad else []), (blocks["deep"] if use_deep else [])
+        return groups, rad, deep, numeric + categorical + rad + deep
+
+    def available(names) -> list[str]:
+        return [n for n in names if n in sets and (not sets[n][1] or blocks["rad"]) and (not sets[n][2] or blocks["deep"])]
+
+    if args.split_gap:
+        if not splits:
+            raise SystemExit("--split-gap needs data.splits_file")
+        sg = cfg.get("split_gap") or {}
+        sg_models = {k: v for k, v in models.items() if k in sg.get("models", ["xgboost", "logreg"])}
+        rows = []
+        for task in cfg["tasks"]:
+            label_col, classes = TASKS[task]
+            sub = df[df[label_col] >= 0]
+            part = {s: [p for p in splits["classification"][s] if p in sub.index] for s in ("train", "val", "test")}
+            y_tr = sub.loc[part["train"], label_col].to_numpy()
+            for fs_name in available(sg.get("feature_sets") or list(sets)):
+                groups, rad, deep, cols = set_blocks(fs_name)
+                for model_name, make_model in sg_models.items():
+                    pipe = build_pipeline(groups, rad, deep, k_rad, k_deep, make_model(), rad_select, memory)
+                    kw = {"clf__sample_weight": compute_sample_weight("balanced", y_tr)} if model_name == "xgboost" else {}
+                    pipe.fit(sub.loc[part["train"], cols], y_tr, **kw)
+                    for split in ("val", "test"):
+                        proba = np.zeros((len(part[split]), len(classes)))
+                        proba[:, pipe.classes_] = pipe.predict_proba(sub.loc[part[split], cols])
+                        rows += [{"task": task, "features": fs_name, "model": model_name, "split": split, "patient_id": pid,
+                                  "y": int(yv), **{f"p_{k}": float(v) for k, v in enumerate(row)}}
+                                 for pid, yv, row in zip(part[split], sub.loc[part[split], label_col], proba)]
+            print(f"{task}: fit on {len(part['train'])} patients, predicted {len(part['val'])} + {len(part['test'])}")
+        shutil.rmtree(memory.location, ignore_errors=True)
+        pd.DataFrame(rows).to_csv(out_dir / "split_gap_predictions.csv", index=False)
+        print(f"Saved {out_dir / 'split_gap_predictions.csv'}")
+        return
+
+    if args.negative_control:
+        nc = cfg.get("negative_control") or {}
+        def single_thread(make):       # many small fits: threads inside each one only add overhead
+            return lambda: (m.set_params(n_jobs=1) if "n_jobs" in (m := make()).get_params() else m)
+        nc_models = {k: single_thread(v) for k, v in models.items() if k in nc.get("models", ["xgboost", "logreg"])}
+        path = out_dir / "negative_control.csv"
+        done = finished_control_runs(path, 2 * len(nc_models))     # after a crash: carry on where it stopped
+
+        def save(rows):
+            pd.DataFrame(rows).to_csv(path, mode="a", header=not path.exists(), index=False)
+
+        for task in nc.get("tasks") or cfg["tasks"]:
+            label_col, classes = TASKS[task]
+            sub = df[df[label_col] >= 0]
+            names = available(nc.get("feature_sets") or ["radiomics", "image"])
+
+            def make_features(fs_name):
+                groups, rad, deep, _ = set_blocks(fs_name)
+                # Only the feature steps of the usual pipeline; the classifier in the template is never fit.
+                return clone(build_pipeline(groups, rad, deep, k_rad, k_deep, None, rad_select).named_steps["features"])
+
+            negative_control_rows(task, {n: sub[set_blocks(n)[3]] for n in names}, sub[label_col].to_numpy(),
+                                  len(classes), nc_models, cfg, make_features, save, done)
+            print(f"{task}: negative control done for {names}", flush=True)
+        shutil.rmtree(memory.location, ignore_errors=True)
+        print(f"Saved {path}")
+        return
 
     if args.learning_curve:
         lc = cfg.get("learning_curve") or {}
@@ -315,9 +458,10 @@ def main() -> None:
                                         **{fit_params_name(cross_val_predict): fit_params})
                 present = np.unique(y)
                 oof_rows += [{"task": task, "features": label, "model": model_name, "patient_id": pid, "y": int(yv),
+                              "age": age, "sex": sex,
                               **{f"p_{k}": float(row[list(present).index(k)]) if k in present else 0.0
                                  for k in range(len(classes))}}
-                             for pid, yv, row in zip(sub.index, y, oof)]
+                             for pid, yv, row, age, sex in zip(sub.index, y, oof, sub["Age"], sub["Sex"])]
 
                 if args.holdout and splits:
                     train_ids = [p for p in splits["classification"]["train"] + splits["classification"]["val"] if p in sub.index]

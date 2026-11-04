@@ -177,6 +177,7 @@ def kfold_figures(root: Path, out: Path) -> None:
 
 # Late-fusion feature sets drawn in the learning-curve and calibration figures (XGBoost, the primary model).
 FIGURE_FEATURE_SETS = ["age+sex", "radiomics", "image", "clinical+radiomics", "image+clinical+radiomics"]
+TASK_TITLES = {"grade": "WHO grade", "diagnosis": "WHO 2021 diagnosis", "lgg_hgg": "LGG vs HGG", "idh": "IDH status"}
 
 
 def learning_curve_figures(root: Path, out: Path, model: str = "xgboost") -> None:
@@ -191,7 +192,7 @@ def learning_curve_figures(root: Path, out: Path, model: str = "xgboost") -> Non
                                                                    sd=("macro_auc", "std"))
             curves[fs] = (s["n"], s["m"], s["sd"])
         plotting.plot_lines(curves, out / f"learning_curve_{task}.png",
-                            f"{task}: macro AUC against training-set size ({model}, mean ± SD over test folds)",
+                            f"{TASK_TITLES[task]}: macro AUC by training-set size ({model})",
                             "training patients", "macro AUC")
 
 
@@ -217,17 +218,23 @@ def calibration_figures(root: Path, out: Path, model: str = "xgboost") -> None:
             reliability[fs] = (mean_p, observed, None)
             decision[fs] = (thresholds, net_benefit(g["y"], g["p_1"], thresholds), None)
         y = sub[sub["features"] == sets[0]]["y"]
+        # The fairer no-imaging reference: logistic regression is not hurt by the near-discrete age, unlike the trees.
+        reference = oof[(oof["task"] == task) & (oof["model"] == "logreg") & (oof["features"] == "age+sex")]
+        if not reference.empty:
+            decision["age+sex (logreg)"] = (thresholds, net_benefit(reference["y"], reference["p_1"], thresholds), None)
+        # Treating everyone plunges at high thresholds; scale to the models so that their differences stay readable.
+        nb = np.concatenate([c[1] for c in decision.values()])
         decision["treat all"] = (thresholds, treat_all_net_benefit(y, thresholds), None)
         plotting.plot_lines(reliability, out / f"calibration_{task}.png",
-                            f"{task}: reliability of P({positive}) ({model}, out-of-fold, n={len(y)})",
+                            f"{TASK_TITLES[task]}: reliability of P({positive}) ({model})",
                             "mean predicted probability", "observed rate", reference=([0, 1], [0, 1], "perfect"),
                             ylim=(-0.02, 1.02))
-        nb = np.concatenate([c[1] for c in decision.values()])
         plotting.plot_lines(decision, out / f"decision_curve_{task}.png",
-                            f"{task}: decision curve for calling {positive} ({model}, out-of-fold)",
+                            f"{TASK_TITLES[task]}: decision curve for {positive} ({model})",
                             "threshold probability", "net benefit", reference=(thresholds, np.zeros_like(thresholds),
                                                                                 "treat none"),
-                            ylim=(min(-0.05, float(np.nanmin(nb))), float(np.nanmax(nb)) + 0.05))
+                            ylim=(min(-0.05, float(np.nanmin(nb))), float(np.nanmax(nb)) + 0.05),
+                            legend_loc="lower left")
 
 
 def radiomics_stability_figure(root: Path, out: Path) -> None:

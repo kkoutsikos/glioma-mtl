@@ -39,10 +39,15 @@ MASKS_VERSION = "largest-component"
 EVAL_VERSION = "LGG/HGG call from the grade call"
 # Version of the Grad-CAM panel; gradcam_panel reruns when it changes.
 PANEL_VERSION = "calls as evaluated (flip-averaged)"
-# Version of the k-fold step's outputs; kfold reruns when it changes (now: cv_folds.csv, oof_predictions.csv).
-KFOLD_VERSION = "per-fold scores, out-of-fold predictions"
+# Version of the k-fold step's outputs; kfold reruns when it changes (now: cv_folds.csv, oof_predictions.csv with the
+# age and sex of each patient, for the subgroup table).
+KFOLD_VERSION = "per-fold scores, out-of-fold predictions with age and sex"
 # Version of the late-fusion learning curves (kfold_cv.py --learning-curve).
 LEARNING_CURVE_VERSION = "stratified fractions of each training fold"
+# Versions of the late-fusion fit for the validation-test gap test (--split-gap) and of the shuffled-label control
+# (--negative-control).
+SPLIT_GAP_VERSION = "fit on classification train, predict val and test"
+NEGATIVE_CONTROL_VERSION = "shuffled labels, feature steps inside against before the folds"
 # Late-fusion feature sets rerun with ground-truth-mask features in the oracle stage (the others use no masks).
 ORACLE_FEATURE_SETS = ["radiomics", "clinical+radiomics", "image", "image+clinical", "image+clinical+radiomics"]
 
@@ -224,6 +229,15 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                                                                         f"data.pred_mask_dir={pred_dir}"])],
                                   optional=spec.get("optional", False), needs=[f"cls_train:{name}", "predict:test"],
                                   version=f"{trained}, eval {EVAL_VERSION}"))
+                # The validation patients through the test patients' code path, to compare with the predictions saved
+                # during training (aggregate_results.py: validation_recheck). Inference only.
+                steps.append(Step(f"cls_eval_val:{name}", "cls", [_script("evaluate_classifier.py"), "--config",
+                                                                 f"{run}/config.yaml", "--checkpoint", f"{run}/best.pt",
+                                                                 "--split", "val", "--out-dir", run,
+                                                                 *sets([], ["data.crop_mask_key=pred_mask",
+                                                                            f"data.pred_mask_dir={pred_dir}"])],
+                                  optional=True, needs=[f"cls_train:{name}", "predict:val"],
+                                  version=f"{trained}, eval {EVAL_VERSION}"))
             first = f"{exp}_s{exp_seeds[0]}"
             run = (root / first).as_posix()
             explain = [_script("explain_classifier.py"), "--config", f"{run}/config.yaml", "--checkpoint",
@@ -255,6 +269,14 @@ def build_steps(plan: dict, cli_overrides: list[str]) -> tuple[list[Step], Path]
                 "--out-dir", (root / "learning_curves").as_posix(), *sets(kfold.get("overrides"), extra)],
                 optional=True, needs=needs,
                 version=f"{masks if len(needs) > 1 else 'no masks'}, {LEARNING_CURVE_VERSION}"))
+        for key, flag, folder, version in (("split_gap", "--split-gap", "split_gap", SPLIT_GAP_VERSION),
+                                           ("negative_control", "--negative-control", "negative_control",
+                                            NEGATIVE_CONTROL_VERSION)):
+            if kfold.get(key, True):
+                steps.append(Step(key, "kfold", [
+                    _script("kfold_cv.py"), "--config", kfold["config"], flag, "--out-dir", (root / folder).as_posix(),
+                    *sets(kfold.get("overrides"), extra)], optional=True, needs=needs,
+                    version=f"{masks if len(needs) > 1 else 'no masks'}, {version}"))
 
     if cls and plan.get("oracle", True):
         steps += oracle_steps(plan, root, sets, seeds, masks)

@@ -122,7 +122,7 @@ def plot_dice_vs_volume(data: Mapping[str, pd.DataFrame], out: str | Path, title
 
 def plot_lines(curves: Mapping[str, tuple[Sequence[float], Sequence[float], Sequence[float] | None]], out: str | Path,
                title: str, xlabel: str, ylabel: str, reference: tuple[Sequence[float], Sequence[float], str] | None = None,
-               ylim: tuple[float, float] | None = None) -> Path:
+               ylim: tuple[float, float] | None = None, legend_loc: str = "best") -> Path:
     """One line per label from ``(x, y, sd)`` (a band of ±sd when given), plus an optional dashed reference line."""
     fig = Figure(figsize=(6, 4.2))
     ax = fig.subplots()
@@ -137,7 +137,7 @@ def plot_lines(curves: Mapping[str, tuple[Sequence[float], Sequence[float], Sequ
     ax.set(xlabel=xlabel, ylabel=ylabel, title=title)
     if ylim is not None:
         ax.set_ylim(*ylim)
-    ax.legend(fontsize=7)
+    ax.legend(fontsize=7, loc=legend_loc)
     ax.grid(alpha=0.3)
     return _save(fig, out)
 

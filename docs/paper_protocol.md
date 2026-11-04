@@ -87,6 +87,9 @@ reference rows.
 | `explain` | first seed of each classifier | which modality / image scale drives each prediction: fusion attention, token occlusion, 3D Grad-CAM per test patient; a Grad-CAM panel per task for the paper (step `gradcam_panel`) | figures |
 | `kfold` | repeated 5-fold × 10 + hold-out | the same ladder as late fusion (image → image + clinical → image + clinical + radiomics, with XGBoost / logistic regression / RF / MLP; "image" = label-free deep features), no-imaging baselines (age + sex, clinical, radiomics), leaky references; XGBoost TreeSHAP per modality; every fold's score (`cv_folds.csv`) | `kfold_cv`, `kfold_holdout`, `kfold_tests` |
 | `learning_curves` (stage `kfold`) | late fusion fit on 25 / 50 / 75 / 100% of each training fold, scored on the full test folds (5-fold × 4) | does any feature set, deep features in particular, keep improving with more patients? | `learning_curves` |
+| `split_gap` (stage `kfold`), post hoc | late fusion fit on classification train, predicting validation and test | is a model's validation-test gap larger than chance assignment of the same patients to the two splits? Late fusion on the same split as the end-to-end models | `split_gap`, `split_gap_pairs` |
+| `negative_control` (stage `kfold`), post hoc | 100 shuffled-label 5-fold passes + the real labels, feature steps fit inside the folds and once before them | does information leak? AUC must be 0.5 on shuffled labels; how much does the common mistake inflate it? | `negative_control` |
+| `cls_eval_val` (stage `cls`), post hoc | every classifier's validation patients through the test code path, nothing retrained | do the validation and test numbers come from the same processing? | `validation_recheck` |
 | `oracle` | every classifier re-evaluated + late fusion refit, nothing retrained | what segmentation errors cost: the same models with ground-truth masks for the crop centre, radiomics and deep features (inside the network the tumour weighting stays its own segmentation head's) | `classification_oracle`, `kfold_oracle` |
 | `aggregate` | – | writes all tables (CSV, Markdown, LaTeX) | – |
 | `figures` | – | training curves, segmentation boxplots + qualitative overlays, confusion matrices, ROC curves, k-fold bars, SHAP | figures |
@@ -102,7 +105,8 @@ reference rows.
 | `<cls run>/predictions_test.csv`, `metrics_test.csv`, `val_predictions_best.csv`, `featurizers.pkl` | test probabilities and metrics with CIs; fitted clinical / radiomics preprocessing |
 | `<cls run, first seed>/explain/` | `attention.csv`, `occlusion.csv` (+ summaries and plots), `gradcam/<patient>_<task>_<map>.png`, `gradcam_panel_<task>.png` (per class, the most confidently correct test patient; copied to `paper_figures/explain/`) |
 | `deep_features/`, `radiomics/` | label-free deep features and radiomics of the cohort |
-| `kfold_cv/` | `cv_results.csv`, `holdout_results.csv`, `holdout_predictions.csv`, `holdout_shap.csv` |
+| `kfold_cv/` | `cv_results.csv`, `cv_folds.csv`, `oof_predictions.csv` (with age and sex, for the subgroup table), `holdout_results.csv`, `holdout_predictions.csv`, `holdout_shap.csv` |
+| `split_gap/`, `negative_control/`, `<cls run>/predictions_val.csv` | the post hoc checks' inputs: `split_gap_predictions.csv`, `negative_control.csv` and the validation predictions through the test code path |
 | `paper_tables/`, `paper_figures/` | all tables (CSV / Markdown / LaTeX) and figures |
 
 ### About the SegMamba sensitivity run and the shared backbone
@@ -221,7 +225,7 @@ sessions.
   out of the model comparison.
 - Use the test split once per final configuration, and choose nothing (epochs, thresholds, feature sets)
   by looking at it. The one exception, the derived LGG/HGG call, is disclosed in section 1.
-- Limitations to state: single centre; T2 only; 162-patient balanced cohort (339 grade-4 patients
+- Limitations to state: single centre; T2 only; 162-patient balanced cohort (333 grade-4 patients
   excluded); classification crops trained on ground-truth masks; segmentation backbone saw the
   classification train images and was chosen after the segmentation benchmark; small test set.
 - Expect lower classification numbers than the thesis. That is the point of the correction. The
